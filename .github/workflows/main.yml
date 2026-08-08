@@ -18,19 +18,27 @@ jobs:
             tigervnc-standalone-server \
             novnc websockify \
             dbus-x11 x11-xserver-utils \
-            jq curl
+            xdg-utils \
+            curl jq \
+            epiphany-browser \
+            fonts-dejavu-core
 
-      - name: Configure VNC and desktop
+      - name: Configure desktop, VNC and browser fallback
         run: |
           set -euo pipefail
 
-          mkdir -p ~/.vnc
-          touch ~/.Xresources
+          mkdir -p "$HOME/.vnc"
+          mkdir -p "$HOME/.local/bin"
+          mkdir -p "$HOME/.local/share/applications"
+          touch "$HOME/.Xresources"
+          touch "$HOME/.Xauthority"
 
-          echo "password" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
+          # VNC password
+          echo "password" | vncpasswd -f > "$HOME/.vnc/passwd"
+          chmod 600 "$HOME/.vnc/passwd"
 
-          cat > ~/.vnc/xstartup <<'EOF'
+          # XFCE startup
+          cat > "$HOME/.vnc/xstartup" <<'EOF'
           #!/bin/sh
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
@@ -38,25 +46,73 @@ jobs:
           xrdb "$HOME/.Xresources"
           exec dbus-launch --exit-with-session startxfce4
           EOF
-          chmod +x ~/.vnc/xstartup
+          chmod +x "$HOME/.vnc/xstartup"
 
-      - name: Start services and keep alive
+          # Browser fallback wrapper
+          cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
+          #!/bin/sh
+          URL="${1:-https://www.google.com}"
+
+          if command -v epiphany-browser >/dev/null 2>&1; then
+              exec epiphany-browser "$URL"
+          fi
+
+          if command -v firefox >/dev/null 2>&1; then
+              exec firefox "$URL"
+          fi
+
+          if command -v chromium >/dev/null 2>&1; then
+              exec chromium "$URL"
+          fi
+
+          if command -v chromium-browser >/dev/null 2>&1; then
+              exec chromium-browser "$URL"
+          fi
+
+          if command -v google-chrome >/dev/null 2>&1; then
+              exec google-chrome "$URL"
+          fi
+
+          echo "No supported browser found."
+          exit 1
+          EOF
+          chmod +x "$HOME/.local/bin/browser-fallback"
+
+          # Default browser desktop file
+          cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
+          [Desktop Entry]
+          Name=Web Browser
+          Comment=Fallback Web Browser
+          Exec=$HOME/.local/bin/browser-fallback %u
+          Terminal=false
+          Type=Application
+          Categories=Network;WebBrowser;
+          MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+          EOF
+
+          xdg-mime default browser-fallback.desktop x-scheme-handler/http || true
+          xdg-mime default browser-fallback.desktop x-scheme-handler/https || true
+          xdg-mime default browser-fallback.desktop text/html || true
+          xdg-settings set default-web-browser browser-fallback.desktop || true
+
+      - name: Start services and expose with Cloudflare
         run: |
           set -euo pipefail
 
-          # VNC on :1 -> localhost:5901
+          # Start VNC display :1 -> port 5901
           vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
           sleep 3
 
-          # noVNC proxy
+          # Start noVNC proxy
           websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
           sleep 2
 
-          # Cloudflared
+          # Download cloudflared
           curl -L --fail -o cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
 
+          # Start tunnel
           nohup ./cloudflared tunnel \
             --url http://127.0.0.1:6080 \
             --no-autoupdate \
@@ -74,7 +130,7 @@ jobs:
           done
 
           if [ -z "$PUBLIC_URL" ]; then
-            echo "Cloudflared failed. Logs:"
+            echo "Cloudflared failed."
             echo "--- cloudflared.log ---"
             cat /tmp/cloudflared.log || true
             echo "--- cloudflared.stdout ---"
