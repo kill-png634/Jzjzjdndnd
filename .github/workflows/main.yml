@@ -1,0 +1,56 @@
+name: Web Desktop with noVNC & Cloudflare Tunnel
+
+on:
+  workflow_dispatch:   # اجرای دستی
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install required packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xfce4 xfce4-goodies tigervnc-standalone-server novnc websockify jq curl
+
+      - name: Configure VNC and desktop
+        run: |
+          mkdir -p ~/.vnc
+          # تنظیم رمز VNC (در اینجا "password" است، می‌توانید تغییر دهید)
+          echo "password" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+
+          # اسکریپت شروع جلسه XFCE
+          cat > ~/.vnc/xstartup << 'EOF'
+          #!/bin/bash
+          xrdb $HOME/.Xresources
+          startxfce4 &
+          EOF
+          chmod +x ~/.vnc/xstartup
+
+      - name: Start services and keep alive
+        run: |
+          # راه‌اندازی سرور VNC روی دیسپلی :۱
+          vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
+          sleep 2
+
+          # راه‌اندازی noVNC (پراکسی WebSocket روی پورت 6080)
+          websockify --web=/usr/share/novnc 6080 localhost:5901 &
+          sleep 2
+
+          # دانلود و اجرای cloudflared
+          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          ./cloudflared tunnel --url http://localhost:6080 --metrics localhost:9999 > /tmp/tunnel.log 2>&1 &
+          sleep 5
+
+          # دریافت آدرس عمومی تونل
+          TUNNEL_HOSTNAME=$(curl -s http://localhost:9999/quicktunnel | jq -r .hostname)
+          PUBLIC_URL="https://$TUNNEL_HOSTNAME"
+
+          # نمایش آدرس در لاگ و خلاصه مرحله
+          echo "🔗 Desktop URL: $PUBLIC_URL"
+          echo "Desktop URL: $PUBLIC_URL" >> $GITHUB_STEP_SUMMARY
+
+          # زنده نگه داشتن رانر به مدت ۶ ساعت (حداکثر زمان مجاز)
+          echo "Keeping the runner alive for 6 hours..."
+          sleep 21600
