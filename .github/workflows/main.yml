@@ -1,56 +1,89 @@
 name: Web Desktop with noVNC & Cloudflare Tunnel
 
 on:
-  workflow_dispatch:   # اجرای دستی
+  workflow_dispatch:
 
 jobs:
   desktop:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     steps:
       - name: Install required packages
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-goodies tigervnc-standalone-server novnc websockify jq curl
+          sudo apt-get install -y \
+            xfce4 xfce4-goodies \
+            tigervnc-standalone-server \
+            novnc websockify \
+            dbus-x11 x11-xserver-utils \
+            jq curl
 
       - name: Configure VNC and desktop
         run: |
+          set -euo pipefail
+
           mkdir -p ~/.vnc
-          # تنظیم رمز VNC (در اینجا "password" است، می‌توانید تغییر دهید)
+          touch ~/.Xresources
+
           echo "password" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # اسکریپت شروع جلسه XFCE
-          cat > ~/.vnc/xstartup << 'EOF'
-          #!/bin/bash
-          xrdb $HOME/.Xresources
-          startxfce4 &
+          cat > ~/.vnc/xstartup <<'EOF'
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          touch "$HOME/.Xresources"
+          xrdb "$HOME/.Xresources"
+          exec dbus-launch --exit-with-session startxfce4
           EOF
           chmod +x ~/.vnc/xstartup
 
       - name: Start services and keep alive
         run: |
-          # راه‌اندازی سرور VNC روی دیسپلی :۱
+          set -euo pipefail
+
+          # VNC on :1 -> localhost:5901
           vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
+          sleep 3
+
+          # noVNC proxy
+          websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
           sleep 2
 
-          # راه‌اندازی noVNC (پراکسی WebSocket روی پورت 6080)
-          websockify --web=/usr/share/novnc 6080 localhost:5901 &
-          sleep 2
-
-          # دانلود و اجرای cloudflared
-          curl -L -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          # Cloudflared
+          curl -L --fail -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
-          ./cloudflared tunnel --url http://localhost:6080 --metrics localhost:9999 > /tmp/tunnel.log 2>&1 &
-          sleep 5
 
-          # دریافت آدرس عمومی تونل
-          TUNNEL_HOSTNAME=$(curl -s http://localhost:9999/quicktunnel | jq -r .hostname)
-          PUBLIC_URL="https://$TUNNEL_HOSTNAME"
+          nohup ./cloudflared tunnel \
+            --url http://127.0.0.1:6080 \
+            --no-autoupdate \
+            --logfile /tmp/cloudflared.log \
+            >/tmp/cloudflared.stdout 2>&1 &
 
-          # نمایش آدرس در لاگ و خلاصه مرحله
-          echo "🔗 Desktop URL: $PUBLIC_URL"
-          echo "Desktop URL: $PUBLIC_URL" >> $GITHUB_STEP_SUMMARY
+          # Wait for public URL
+          PUBLIC_URL=""
+          for i in $(seq 1 60); do
+            PUBLIC_URL=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
 
-          # زنده نگه داشتن رانر به مدت ۶ ساعت (حداکثر زمان مجاز)
-          echo "Keeping the runner alive for 6 hours..."
+          if [ -z "$PUBLIC_URL" ]; then
+            echo "Cloudflared failed. Logs:"
+            echo "--- cloudflared.log ---"
+            cat /tmp/cloudflared.log || true
+            echo "--- cloudflared.stdout ---"
+            cat /tmp/cloudflared.stdout || true
+            exit 1
+          fi
+
+          echo "Desktop URL: $PUBLIC_URL"
+          echo "Desktop URL: $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
+
+          # Keep job alive
           sleep 21600
