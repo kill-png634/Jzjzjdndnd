@@ -1,153 +1,308 @@
-name: Web Desktop (KasmVNC + Browsers)
+name: Lightweight Web Desktop with Openbox + KasmVNC + Cloudflare
 
 on:
   workflow_dispatch:
-    inputs:
-      duration:
-        description: 'Session duration in minutes (max 350)'
-        required: false
-        default: '340'
-      password:
-        description: 'VNC password'
-        required: false
-        default: 'kasm1234'
 
 jobs:
   desktop:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 355
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
-      - name: Prepare environment
+      - name: Install lightweight desktop
         run: |
-          echo "=== System Info ==="
-          uname -a
-          df -h /
-          sudo apt-get update -y
+          set -euo pipefail
 
-      - name: Install XFCE desktop
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            xfce4 xfce4-goodies xfce4-terminal \
-            dbus-x11 x11-xserver-utils xauth \
-            fonts-dejavu fonts-liberation \
-            pulseaudio \
-            wget curl gnupg ca-certificates apt-transport-https software-properties-common
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            openbox \
+            xterm \
+            dbus-x11 \
+            x11-xserver-utils \
+            xdg-utils \
+            curl \
+            wget \
+            ca-certificates \
+            jq \
+            fonts-dejavu-core
 
       - name: Install KasmVNC
         run: |
-          KASM_VER="1.3.3"
-          KASM_DEB="kasmvncserver_jammy_${KASM_VER}_amd64.deb"
-          wget -q "https://github.com/kasmtech/KasmVNC/releases/download/v${KASM_VER}/${KASM_DEB}" -O /tmp/kasmvnc.deb
-          sudo apt-get install -y /tmp/kasmvnc.deb
-          sudo usermod -aG ssl-cert $USER || true
+          set -euo pipefail
 
-      - name: Install browsers (Firefox + Chrome + Chromium)
-        run: |
-          # --- Firefox via Mozilla APT (avoid snap) ---
-          sudo install -d -m 0755 /etc/apt/keyrings
-          wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- \
-            | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
-          echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
-            | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null
-          printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
-            | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y firefox
+          echo "=========================================="
+          echo " Installing KasmVNC"
+          echo "=========================================="
 
-          # --- Google Chrome ---
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/chrome.deb
+          ARCH="$(dpkg --print-architecture)"
+          echo "Architecture: $ARCH"
 
-          # --- Chromium (fallback, may fail on some runners) ---
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser || true
-
-      - name: Configure KasmVNC session
-        run: |
-          mkdir -p ~/.vnc
-          cat > ~/.vnc/xstartup <<'EOS'
-          #!/bin/bash
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          export XDG_SESSION_TYPE=x11
-          export XDG_CURRENT_DESKTOP=XFCE
-          dbus-launch --exit-with-session startxfce4 &
-          EOS
-          chmod +x ~/.vnc/xstartup
-
-          cat > ~/.vnc/kasmvnc.yaml <<'YAML'
-          network:
-            protocol: http
-            interface: 0.0.0.0
-            websocket_port: 6901
-          desktop:
-            resolution:
-              width: 1440
-              height: 900
-            allow_resize: true
-          runtime_configuration:
-            allow_client_to_override_kasm_server_settings: true
-          logging:
-            log_writer_name: all
-            log_dest: logfile
-            level: 30
-          YAML
-
-          # set VNC password (non-interactive)
-          PW='${{ github.event.inputs.password }}'
-          printf '%s\n%s\n' "$PW" "$PW" | vncpasswd -u kasm -w -r owner || true
-
-      - name: Install cloudflared
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O /tmp/cf.deb
-          sudo dpkg -i /tmp/cf.deb
-
-      - name: Start KasmVNC server
-        run: |
-          vncserver :1 -select-de xfce -disableBasicAuth -geometry 1440x900 -depth 24 -websocketPort 6901 &
-          sleep 8
-          echo "=== Listening ports ==="
-          ss -tlnp | grep -E '5901|6901' || true
-          echo "=== VNC log tail ==="
-          tail -n 40 ~/.vnc/*.log 2>/dev/null || true
-
-      - name: Start Cloudflare tunnel and print URL
-        run: |
-          nohup cloudflared tunnel --no-autoupdate --url http://localhost:6901 > /tmp/cf.log 2>&1 &
-          echo "Waiting for tunnel URL..."
-          URL=""
-          for i in $(seq 1 30); do
-            URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /tmp/cf.log | head -n1)
-            [ -n "$URL" ] && break
-            sleep 2
-          done
-          if [ -z "$URL" ]; then
-            echo "❌ Tunnel URL not found. Log:"
-            cat /tmp/cf.log
+          if [ "$ARCH" = "amd64" ]; then
+            KASM_URL="https://github.com/kasmtech/KasmVNC/releases/latest/download/kasmvncserver_ubuntu_jammy_amd64.deb"
+          elif [ "$ARCH" = "arm64" ]; then
+            KASM_URL="https://github.com/kasmtech/KasmVNC/releases/latest/download/kasmvncserver_ubuntu_jammy_arm64.deb"
+          else
+            echo "Unsupported architecture: $ARCH"
             exit 1
           fi
-          echo ""
-          echo "================================================"
-          echo " 🖥  Web Desktop is ready!"
-          echo " 🔗 URL:      $URL"
-          echo " 👤 Password: ${{ github.event.inputs.password }}"
-          echo "================================================"
-          echo "DESKTOP_URL=$URL" >> $GITHUB_ENV
-          echo "### 🖥 Web Desktop"        >> $GITHUB_STEP_SUMMARY
-          echo "**URL:** $URL"              >> $GITHUB_STEP_SUMMARY
-          echo "**Password:** ${{ github.event.inputs.password }}" >> $GITHUB_STEP_SUMMARY
 
-      - name: Keep session alive
+          wget -O /tmp/kasmvnc.deb "$KASM_URL"
+
+          sudo apt-get install -y /tmp/kasmvnc.deb || {
+            sudo apt-get -f install -y
+            sudo apt-get install -y /tmp/kasmvnc.deb
+          }
+
+          rm -f /tmp/kasmvnc.deb
+
+          echo "KasmVNC installed."
+
+      - name: Configure Openbox and KasmVNC
         run: |
-          MIN=${{ github.event.inputs.duration }}
-          MIN=${MIN:-340}
-          if [ "$MIN" -gt 350 ]; then MIN=350; fi
-          END=$(( $(date +%s) + MIN*60 ))
-          echo "Session will end at: $(date -d @$END)"
-          while [ $(date +%s) -lt $END ]; do
-            if ! pgrep -x cloudflared > /dev/null; then
-              echo "cloudflared died, log:"; tail -n 50 /tmp/cf.log; exit 1
+          set -euo pipefail
+
+          mkdir -p "$HOME/.vnc"
+          mkdir -p "$HOME/.config/openbox"
+          mkdir -p "$HOME/.local/bin"
+          mkdir -p "$HOME/.local/share/applications"
+
+          touch "$HOME/.Xresources"
+
+          # VNC password
+          echo "password" | vncpasswd -f > "$HOME/.vnc/passwd"
+          chmod 600 "$HOME/.vnc/passwd"
+
+          # Openbox configuration
+          cat > "$HOME/.config/openbox/rc.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+
+          <openbox_config xmlns="http://openbox.org/3.4/rc">
+
+            <focus>
+              <focusNew>yes</focusNew>
+              <followMouse>no</followMouse>
+              <focusLast>yes</focusLast>
+              <underMouse>no</underMouse>
+              <raiseOnFocus>no</raiseOnFocus>
+            </focus>
+
+            <desktops>
+              <number>1</number>
+              <firstdesk>1</firstdesk>
+            </desktops>
+
+            <applications>
+              <application class="*">
+                <decor>yes</decor>
+              </application>
+            </applications>
+
+          </openbox_config>
+          EOF
+
+          # Lightweight startup
+          cat > "$HOME/.vnc/xstartup" <<'EOF'
+          #!/bin/sh
+
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+
+          export XDG_CURRENT_DESKTOP=Openbox
+          export XDG_SESSION_DESKTOP=Openbox
+
+          xrdb "$HOME/.Xresources" || true
+
+          if command -v dbus-launch >/dev/null 2>&1; then
+              exec dbus-launch --exit-with-session openbox-session
+          else
+              exec openbox-session
+          fi
+          EOF
+
+          chmod +x "$HOME/.vnc/xstartup"
+
+          # Browser launcher
+          cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
+          #!/bin/sh
+
+          URL="${1:-https://www.google.com}"
+
+          if command -v chromium >/dev/null 2>&1; then
+              exec chromium \
+                --disable-gpu \
+                --disable-dev-shm-usage \
+                --no-sandbox \
+                "$URL"
+          fi
+
+          if command -v chromium-browser >/dev/null 2>&1; then
+              exec chromium-browser \
+                --disable-gpu \
+                --disable-dev-shm-usage \
+                --no-sandbox \
+                "$URL"
+          fi
+
+          if command -v firefox >/dev/null 2>&1; then
+              exec firefox "$URL"
+          fi
+
+          echo "No supported browser found."
+          exit 1
+          EOF
+
+          chmod +x "$HOME/.local/bin/browser-fallback"
+
+          # Desktop launcher
+          cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
+          [Desktop Entry]
+          Name=Web Browser
+          Comment=Lightweight Web Browser
+          Exec=$HOME/.local/bin/browser-fallback %u
+          Terminal=false
+          Type=Application
+          Categories=Network;WebBrowser;
+          MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+          EOF
+
+          xdg-mime default browser-fallback.desktop x-scheme-handler/http || true
+          xdg-mime default browser-fallback.desktop x-scheme-handler/https || true
+          xdg-mime default browser-fallback.desktop text/html || true
+
+      - name: Start KasmVNC and Cloudflare
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo " Starting lightweight desktop"
+          echo "=========================================="
+
+          # Remove possible old VNC sessions
+          vncserver -kill :1 >/dev/null 2>&1 || true
+
+          # Start KasmVNC
+          vncserver :1 \
+            -geometry 1280x720 \
+            -depth 24 \
+            -localhost yes
+
+          sleep 5
+
+          echo "KasmVNC started."
+
+          # KasmVNC normally listens on 6901.
+          # Detect actual listening port.
+          VNC_PORT=""
+
+          for i in $(seq 1 30); do
+            VNC_PORT=$(ss -lntp 2>/dev/null | \
+              grep -E ':(690[0-9]|590[0-9]) ' | \
+              sed -n '1p' | \
+              grep -oE ':[0-9]+' | \
+              tr -d ':' || true)
+
+            if [ -n "$VNC_PORT" ]; then
+              break
             fi
-            sleep 60
+
+            sleep 2
           done
-          echo "Session finished."
+
+          if [ -z "$VNC_PORT" ]; then
+            echo "Could not detect KasmVNC port."
+            ps aux | grep -i vnc || true
+            ss -lntp || true
+            exit 1
+          fi
+
+          echo "Detected VNC port: $VNC_PORT"
+
+          # Cloudflared
+          curl -L --fail \
+            -o /tmp/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          chmod +x /tmp/cloudflared
+
+          # Start Cloudflare Quick Tunnel
+          nohup /tmp/cloudflared tunnel \
+            --url "http://127.0.0.1:${VNC_PORT}" \
+            --no-autoupdate \
+            --logfile /tmp/cloudflared.log \
+            >/tmp/cloudflared.stdout 2>&1 &
+
+          echo "Waiting for Cloudflare URL..."
+
+          PUBLIC_URL=""
+
+          for i in $(seq 1 90); do
+
+            PUBLIC_URL=$(
+              grep -oE \
+                'https://[-a-z0-9]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log \
+                2>/dev/null |
+              head -n 1 || true
+            )
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            PUBLIC_URL=$(
+              grep -oE \
+                'https://[-a-z0-9]+\.trycloudflare\.com' \
+                /tmp/cloudflared.stdout \
+                2>/dev/null |
+              head -n 1 || true
+            )
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$PUBLIC_URL" ]; then
+            echo "Cloudflare Tunnel failed."
+
+            echo "========== cloudflared.log =========="
+            cat /tmp/cloudflared.log || true
+
+            echo "========== cloudflared.stdout =========="
+            cat /tmp/cloudflared.stdout || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo " DESKTOP READY"
+          echo "=========================================="
+          echo ""
+          echo "Desktop URL:"
+          echo "$PUBLIC_URL"
+          echo ""
+
+          echo "## 🖥️ Lightweight Web Desktop" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Desktop URL:** $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**VNC Port:** $VNC_PORT" >> "$GITHUB_STEP_SUMMARY"
+
+          # Keep workflow alive
+          while true; do
+            sleep 60
+
+            if ! pgrep -f "cloudflared tunnel" >/dev/null; then
+              echo "Cloudflare process stopped."
+              exit 1
+            fi
+
+            if ! pgrep -f "vnc" >/dev/null; then
+              echo "VNC process stopped."
+              exit 1
+            fi
+          done
