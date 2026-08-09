@@ -82,8 +82,10 @@ jobs:
             -p /general/use_compositing \
             -s false || true
 
+          # Browser fallback
           cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
           #!/bin/sh
+
           URL="${1:-https://www.google.com}"
 
           if command -v epiphany-browser >/dev/null 2>&1; then
@@ -145,11 +147,12 @@ jobs:
             --log-target=stderr || true
 
           sleep 2
+
           echo "===== PulseAudio ====="
           pactl info || true
 
       # ============================================================
-      # 4. Start Xpra and verify origin is actually ready
+      # 4. Start Xpra and verify it is ready
       # ============================================================
       - name: Start Xpra
         run: |
@@ -160,7 +163,8 @@ jobs:
           chmod 700 "$XDG_RUNTIME_DIR"
 
           echo "Starting Xpra..."
-          nohup xpra start-desktop :100 \
+
+          nohup xpra desktop :100 \
             --bind-tcp=127.0.0.1:${XPRA_PORT} \
             --html=on \
             --mdns=no \
@@ -175,13 +179,14 @@ jobs:
             --dpi=96 \
             --encoding=auto \
             --min-quality=50 \
-            --start-child="dbus-launch --exit-with-session startxfce4" \
+            --exit-with-children=yes \
+            --start-child="dbus-launch --exit-with-session xfce4-session" \
             > /tmp/xpra.log 2>&1 &
 
           echo "Waiting for Xpra HTTP endpoint..."
           READY=0
 
-          for i in $(seq 1 60); do
+          for i in $(seq 1 90); do
             if ss -lnt | grep -q ":${XPRA_PORT} "; then
               if curl -fsS "http://127.0.0.1:${XPRA_PORT}/" >/dev/null 2>&1; then
                 READY=1
@@ -193,7 +198,11 @@ jobs:
 
           echo ""
           echo "===== Xpra log ====="
-          tail -n 80 /tmp/xpra.log || true
+          tail -n 120 /tmp/xpra.log || true
+
+          echo ""
+          echo "===== Xpra server log ====="
+          find "$XDG_RUNTIME_DIR/xpra" -name server.log -type f -print -exec tail -n 120 {} \; || true
 
           echo ""
           echo "===== Xpra sessions ====="
@@ -202,7 +211,7 @@ jobs:
           if [ "$READY" -ne 1 ]; then
             echo ""
             echo "XPRA DID NOT BECOME READY"
-            echo "Check /tmp/xpra.log"
+            echo "Check /tmp/xpra.log and $XDG_RUNTIME_DIR/xpra/100/server.log"
             exit 1
           fi
 
@@ -297,6 +306,7 @@ jobs:
             echo "- 🎤 Microphone forwarding"
             echo "- 📋 Clipboard"
             echo "- 🔔 Notifications"
+            echo "- ⚡ Xpra remote desktop"
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "Keeping desktop alive for 6 hours..."
