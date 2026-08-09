@@ -31,21 +31,22 @@ jobs:
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-pulseaudio \
-            epiphany-browser
+            epiphany-browser \
+            fonts-dejavu-core
 
           # Add official Xpra repository
           curl -fsSL https://xpra.org/gpg.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/xpra.gpg
 
-          echo "deb [signed-by=/usr/share/keyrings/xpra.gpg] https://xpra.org/ubuntu/ noble main" \
+          echo "deb [signed-by=/usr/share/keyrings/xpra.gpg] https://xpra.org/ noble main" \
             | sudo tee /etc/apt/sources.list.d/xpra.list
 
           sudo apt-get update
 
           sudo apt-get install -y \
-            xpra \
-            xpra-audio \
-            xpra-html5
+            xpra-server \
+            xpra-html5 \
+            xpra-audio-server
 
       - name: Configure desktop
         run: |
@@ -54,7 +55,6 @@ jobs:
           mkdir -p "$HOME/.config/xfce4"
           mkdir -p "$HOME/.local/bin"
           mkdir -p "$HOME/.local/share/applications"
-
           touch "$HOME/.Xresources"
 
           # Disable XFCE compositor for better performance
@@ -134,7 +134,6 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR"
           chmod 700 "$XDG_RUNTIME_DIR"
 
-          # Start XFCE desktop inside Xpra
           xpra start-desktop :100 \
             --bind-tcp=127.0.0.1:14500 \
             --html=on \
@@ -224,5 +223,4 @@ jobs:
             echo "🔐 Xpra session is running on the GitHub runner."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Keep runner alive
           sleep 21600
