@@ -1,0 +1,228 @@
+name: Web Desktop with Xpra + HTML5 + Audio
+
+on:
+  workflow_dispatch:
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Install desktop and Xpra
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            dbus-x11 \
+            x11-xserver-utils \
+            xdg-utils \
+            curl \
+            wget \
+            jq \
+            pulseaudio \
+            pulseaudio-utils \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-pulseaudio \
+            epiphany-browser
+
+          # Add official Xpra repository
+          curl -fsSL https://xpra.org/gpg.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/xpra.gpg
+
+          echo "deb [signed-by=/usr/share/keyrings/xpra.gpg] https://xpra.org/ubuntu/ noble main" \
+            | sudo tee /etc/apt/sources.list.d/xpra.list
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            xpra \
+            xpra-audio \
+            xpra-html5
+
+      - name: Configure desktop
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.config/xfce4"
+          mkdir -p "$HOME/.local/bin"
+          mkdir -p "$HOME/.local/share/applications"
+
+          touch "$HOME/.Xresources"
+
+          # Disable XFCE compositor for better performance
+          xfconf-query \
+            -c xfwm4 \
+            -p /general/use_compositing \
+            -s false || true
+
+          # Browser fallback
+          cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
+          #!/bin/sh
+
+          URL="${1:-https://www.google.com}"
+
+          if command -v epiphany-browser >/dev/null 2>&1; then
+              exec epiphany-browser "$URL"
+          fi
+
+          if command -v firefox >/dev/null 2>&1; then
+              exec firefox "$URL"
+          fi
+
+          if command -v chromium >/dev/null 2>&1; then
+              exec chromium "$URL"
+          fi
+
+          if command -v chromium-browser >/dev/null 2>&1; then
+              exec chromium-browser "$URL"
+          fi
+
+          echo "No browser installed."
+          exit 1
+          EOF
+
+          chmod +x "$HOME/.local/bin/browser-fallback"
+
+          cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
+          [Desktop Entry]
+          Name=Web Browser
+          Exec=$HOME/.local/bin/browser-fallback %u
+          Terminal=false
+          Type=Application
+          Categories=Network;WebBrowser;
+          MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+          EOF
+
+          xdg-mime default browser-fallback.desktop \
+            x-scheme-handler/http || true
+
+          xdg-mime default browser-fallback.desktop \
+            x-scheme-handler/https || true
+
+          xdg-mime default browser-fallback.desktop \
+            text/html || true
+
+      - name: Start PulseAudio
+        run: |
+          set -euo pipefail
+
+          export XDG_RUNTIME_DIR="/tmp/runtime-$USER"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+
+          pulseaudio \
+            --start \
+            --daemonize=true \
+            --exit-idle-time=-1 \
+            --log-target=stderr || true
+
+          pactl info || true
+
+      - name: Start Xpra
+        run: |
+          set -euo pipefail
+
+          export XDG_RUNTIME_DIR="/tmp/runtime-$USER"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+
+          # Start XFCE desktop inside Xpra
+          xpra start-desktop :100 \
+            --bind-tcp=127.0.0.1:14500 \
+            --html=on \
+            --mdns=no \
+            --daemon=yes \
+            --pulseaudio=yes \
+            --speaker=on \
+            --microphone=on \
+            --clipboard=yes \
+            --notifications=yes \
+            --resize-display=yes \
+            --desktop-scaling=off \
+            --dpi=96 \
+            --encoding=auto \
+            --min-speed=2M \
+            --min-quality=50 \
+            --start-child="dbus-launch --exit-with-session startxfce4"
+
+          sleep 8
+
+          echo "Xpra status:"
+          xpra list || true
+
+      - name: Start Cloudflare Tunnel
+        run: |
+          set -euo pipefail
+
+          curl -L --fail \
+            -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          chmod +x cloudflared
+
+          nohup ./cloudflared tunnel \
+            --url http://127.0.0.1:14500 \
+            --no-autoupdate \
+            --logfile /tmp/cloudflared.log \
+            >/tmp/cloudflared.stdout 2>&1 &
+
+          PUBLIC_URL=""
+
+          for i in $(seq 1 60); do
+            PUBLIC_URL=$(
+              grep -oE \
+              'https://[-a-z0-9]+\.trycloudflare\.com' \
+              /tmp/cloudflared.log \
+              | head -n 1 || true
+            )
+
+            if [ -n "$PUBLIC_URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$PUBLIC_URL" ]; then
+            echo "Cloudflare Tunnel failed."
+            echo "===== cloudflared.log ====="
+            cat /tmp/cloudflared.log || true
+            echo "===== cloudflared.stdout ====="
+            cat /tmp/cloudflared.stdout || true
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "       XPRA WEB DESKTOP READY"
+          echo "=========================================="
+          echo ""
+          echo "Desktop URL:"
+          echo "$PUBLIC_URL"
+          echo ""
+          echo "Open the URL in your browser."
+          echo ""
+          echo "=========================================="
+
+          {
+            echo "## 🖥️ Xpra Web Desktop"
+            echo ""
+            echo "**Desktop URL:** $PUBLIC_URL"
+            echo ""
+            echo "🔊 Audio forwarding: enabled"
+            echo ""
+            echo "🖥️ Resolution: auto"
+            echo ""
+            echo "🔐 Xpra session is running on the GitHub runner."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Keep runner alive
+          sleep 21600
