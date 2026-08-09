@@ -14,7 +14,6 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
-
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             openbox \
             xterm \
@@ -36,25 +35,48 @@ jobs:
           echo "=========================================="
 
           ARCH="$(dpkg --print-architecture)"
-          echo "Architecture: $ARCH"
+          . /etc/os-release
+          CODENAME="${VERSION_CODENAME:-}"
 
-          if [ "$ARCH" = "amd64" ]; then
-            KASM_URL="https://github.com/kasmtech/KasmVNC/releases/latest/download/kasmvncserver_ubuntu_jammy_amd64.deb"
-          elif [ "$ARCH" = "arm64" ]; then
-            KASM_URL="https://github.com/kasmtech/KasmVNC/releases/latest/download/kasmvncserver_ubuntu_jammy_arm64.deb"
-          else
-            echo "Unsupported architecture: $ARCH"
+          echo "Architecture: $ARCH"
+          echo "Codename: $CODENAME"
+
+          RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest)"
+
+          PACKAGE_URL="$(
+            printf '%s' "$RELEASE_JSON" | jq -r \
+              --arg codename "$CODENAME" \
+              --arg arch "$ARCH" '
+                [ .assets[].browser_download_url
+                  | select(test("kasmvncserver_.*" + $codename + ".*_" + $arch + "\\.deb$"; "i"))
+                ][0] // empty
+              '
+          )"
+
+          if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
+            PACKAGE_URL="$(
+              printf '%s' "$RELEASE_JSON" | jq -r \
+                --arg arch "$ARCH" '
+                  [ .assets[].browser_download_url
+                    | select(test("kasmvncserver_.*_" + $arch + "\\.deb$"; "i"))
+                  ][0] // empty
+                '
+            )"
+          fi
+
+          if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
+            echo "Could not find a matching KasmVNC .deb asset in the latest release."
+            echo "Available assets:"
+            printf '%s' "$RELEASE_JSON" | jq -r '.assets[].name'
             exit 1
           fi
 
-          wget -O /tmp/kasmvnc.deb "$KASM_URL"
+          echo "Using package: $PACKAGE_URL"
 
-          sudo apt-get install -y /tmp/kasmvnc.deb || {
-            sudo apt-get -f install -y
-            sudo apt-get install -y /tmp/kasmvnc.deb
-          }
+          wget -O /tmp/kasmvnc.deb "$PACKAGE_URL"
+          sudo apt-get install -y /tmp/kasmvnc.deb
 
-          rm -f /tmp/kasmvnc.deb
+          sudo adduser "$USER" ssl-cert || true
 
           echo "KasmVNC installed."
 
@@ -69,16 +91,12 @@ jobs:
 
           touch "$HOME/.Xresources"
 
-          # VNC password
           echo "password" | vncpasswd -f > "$HOME/.vnc/passwd"
           chmod 600 "$HOME/.vnc/passwd"
 
-          # Openbox configuration
           cat > "$HOME/.config/openbox/rc.xml" <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
-
           <openbox_config xmlns="http://openbox.org/3.4/rc">
-
             <focus>
               <focusNew>yes</focusNew>
               <followMouse>no</followMouse>
@@ -86,25 +104,20 @@ jobs:
               <underMouse>no</underMouse>
               <raiseOnFocus>no</raiseOnFocus>
             </focus>
-
             <desktops>
               <number>1</number>
               <firstdesk>1</firstdesk>
             </desktops>
-
             <applications>
               <application class="*">
                 <decor>yes</decor>
               </application>
             </applications>
-
           </openbox_config>
           EOF
 
-          # Lightweight startup
           cat > "$HOME/.vnc/xstartup" <<'EOF'
           #!/bin/sh
-
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
 
@@ -122,30 +135,28 @@ jobs:
 
           chmod +x "$HOME/.vnc/xstartup"
 
-          # Browser launcher
           cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
           #!/bin/sh
-
           URL="${1:-https://www.google.com}"
 
           if command -v chromium >/dev/null 2>&1; then
-              exec chromium \
-                --disable-gpu \
-                --disable-dev-shm-usage \
-                --no-sandbox \
-                "$URL"
+            exec chromium \
+              --disable-gpu \
+              --disable-dev-shm-usage \
+              --no-sandbox \
+              "$URL"
           fi
 
           if command -v chromium-browser >/dev/null 2>&1; then
-              exec chromium-browser \
-                --disable-gpu \
-                --disable-dev-shm-usage \
-                --no-sandbox \
-                "$URL"
+            exec chromium-browser \
+              --disable-gpu \
+              --disable-dev-shm-usage \
+              --no-sandbox \
+              "$URL"
           fi
 
           if command -v firefox >/dev/null 2>&1; then
-              exec firefox "$URL"
+            exec firefox "$URL"
           fi
 
           echo "No supported browser found."
@@ -154,7 +165,6 @@ jobs:
 
           chmod +x "$HOME/.local/bin/browser-fallback"
 
-          # Desktop launcher
           cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
           [Desktop Entry]
           Name=Web Browser
@@ -178,10 +188,8 @@ jobs:
           echo " Starting lightweight desktop"
           echo "=========================================="
 
-          # Remove possible old VNC sessions
           vncserver -kill :1 >/dev/null 2>&1 || true
 
-          # Start KasmVNC
           vncserver :1 \
             -geometry 1280x720 \
             -depth 24 \
@@ -191,43 +199,21 @@ jobs:
 
           echo "KasmVNC started."
 
-          # KasmVNC normally listens on 6901.
-          # Detect actual listening port.
-          VNC_PORT=""
+          WEB_PORT="6901"
 
-          for i in $(seq 1 30); do
-            VNC_PORT=$(ss -lntp 2>/dev/null | \
-              grep -E ':(690[0-9]|590[0-9]) ' | \
-              sed -n '1p' | \
-              grep -oE ':[0-9]+' | \
-              tr -d ':' || true)
-
-            if [ -n "$VNC_PORT" ]; then
-              break
-            fi
-
-            sleep 2
-          done
-
-          if [ -z "$VNC_PORT" ]; then
-            echo "Could not detect KasmVNC port."
-            ps aux | grep -i vnc || true
-            ss -lntp || true
-            exit 1
+          if ! ss -lntp 2>/dev/null | grep -q ":${WEB_PORT} "; then
+            echo "Warning: port ${WEB_PORT} is not listening yet, continuing anyway."
           fi
 
-          echo "Detected VNC port: $VNC_PORT"
-
-          # Cloudflared
           curl -L --fail \
             -o /tmp/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
 
           chmod +x /tmp/cloudflared
 
-          # Start Cloudflare Quick Tunnel
           nohup /tmp/cloudflared tunnel \
-            --url "http://127.0.0.1:${VNC_PORT}" \
+            --url "https://127.0.0.1:${WEB_PORT}" \
+            --no-tls-verify \
             --no-autoupdate \
             --logfile /tmp/cloudflared.log \
             >/tmp/cloudflared.stdout 2>&1 &
@@ -237,26 +223,17 @@ jobs:
           PUBLIC_URL=""
 
           for i in $(seq 1 90); do
-
-            PUBLIC_URL=$(
-              grep -oE \
-                'https://[-a-z0-9]+\.trycloudflare\.com' \
-                /tmp/cloudflared.log \
-                2>/dev/null |
-              head -n 1 || true
-            )
+            PUBLIC_URL="$(
+              grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -n 1 || true
+            )"
 
             if [ -n "$PUBLIC_URL" ]; then
               break
             fi
 
-            PUBLIC_URL=$(
-              grep -oE \
-                'https://[-a-z0-9]+\.trycloudflare\.com' \
-                /tmp/cloudflared.stdout \
-                2>/dev/null |
-              head -n 1 || true
-            )
+            PUBLIC_URL="$(
+              grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.stdout 2>/dev/null | head -n 1 || true
+            )"
 
             if [ -n "$PUBLIC_URL" ]; then
               break
@@ -286,13 +263,14 @@ jobs:
           echo "$PUBLIC_URL"
           echo ""
 
-          echo "## 🖥️ Lightweight Web Desktop" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Desktop URL:** $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**VNC Port:** $VNC_PORT" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## 🖥️ Lightweight Web Desktop"
+            echo ""
+            echo "**Desktop URL:** $PUBLIC_URL"
+            echo ""
+            echo "**Web Port:** $WEB_PORT"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          # Keep workflow alive
           while true; do
             sleep 60
 
@@ -301,7 +279,7 @@ jobs:
               exit 1
             fi
 
-            if ! pgrep -f "vnc" >/dev/null; then
+            if ! pgrep -f "vncserver" >/dev/null && ! pgrep -f "Xvnc" >/dev/null; then
               echo "VNC process stopped."
               exit 1
             fi
