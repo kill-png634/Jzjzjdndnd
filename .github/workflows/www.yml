@@ -34,7 +34,6 @@ jobs:
             epiphany-browser \
             fonts-dejavu-core
 
-          # Add official Xpra repository
           curl -fsSL https://xpra.org/gpg.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/xpra.gpg
 
@@ -57,13 +56,11 @@ jobs:
           mkdir -p "$HOME/.local/share/applications"
           touch "$HOME/.Xresources"
 
-          # Disable XFCE compositor for better performance
           xfconf-query \
             -c xfwm4 \
             -p /general/use_compositing \
             -s false || true
 
-          # Browser fallback
           cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
           #!/bin/sh
 
@@ -101,14 +98,9 @@ jobs:
           MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
           EOF
 
-          xdg-mime default browser-fallback.desktop \
-            x-scheme-handler/http || true
-
-          xdg-mime default browser-fallback.desktop \
-            x-scheme-handler/https || true
-
-          xdg-mime default browser-fallback.desktop \
-            text/html || true
+          xdg-mime default browser-fallback.desktop x-scheme-handler/http || true
+          xdg-mime default browser-fallback.desktop x-scheme-handler/https || true
+          xdg-mime default browser-fallback.desktop text/html || true
 
       - name: Start PulseAudio
         run: |
@@ -148,7 +140,6 @@ jobs:
             --desktop-scaling=off \
             --dpi=96 \
             --encoding=auto \
-            --min-speed=2M \
             --min-quality=50 \
             --start-child="dbus-launch --exit-with-session startxfce4"
 
@@ -177,10 +168,8 @@ jobs:
 
           for i in $(seq 1 60); do
             PUBLIC_URL=$(
-              grep -oE \
-              'https://[-a-z0-9]+\.trycloudflare\.com' \
-              /tmp/cloudflared.log \
-              | head -n 1 || true
+              grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log | head -n 1 || true
             )
 
             if [ -n "$PUBLIC_URL" ]; then
