@@ -3,33 +3,51 @@ name: Web Desktop with noVNC & Cloudflare Tunnel
 on:
   workflow_dispatch:
 
+env:
+  PERSIST_DIR: ${{ github.workspace }}/persist
+
 jobs:
   desktop:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
-    env:
-      STATE_DIR: ${{ github.workspace }}/persisted-state
-      HOME_CACHE_KEY: web-desktop-state-v4-${{ runner.os }}
+    timeout-minutes: 355
 
     steps:
-      - name: Restore persisted state
-        id: cache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: persisted-state
-          key: ${{ env.HOME_CACHE_KEY }}
-          restore-keys: |
-            web-desktop-state-v4-${{ runner.os }}-
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Restore files into HOME
+      - name: Restore persistent state cache
+        id: persist-cache
+        uses: actions/cache@v6
+        with:
+          path: persist
+          key: desktop-state-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            desktop-state-${{ runner.os }}-
+
+      - name: Merge restored state into home
         run: |
           set -euo pipefail
-          mkdir -p "$STATE_DIR/home"
-          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.cache" "$HOME/.vnc" "$HOME/Downloads"
-
-          if [ -d "$STATE_DIR/home" ]; then
-            rsync -a "$STATE_DIR/home/" "$HOME/" || true
+          PERSIST_HOME="$PERSIST_DIR/home"
+          if [ -d "$PERSIST_HOME" ]; then
+            for item in \
+              ".vnc" \
+              ".local/bin" \
+              ".local/share/applications" \
+              ".config/xfce4" \
+              ".config/epiphany" \
+              ".local/share/epiphany" \
+              ".config/chromium" \
+              ".config/google-chrome" \
+              ".mozilla/firefox" \
+              "Downloads" \
+              "Desktop" \
+              "Documents"
+            do
+              if [ -e "$PERSIST_HOME/$item" ]; then
+                mkdir -p "$HOME/$(dirname "$item")"
+                rsync -a "$PERSIST_HOME/$item/" "$HOME/$item/" || true
+              fi
+            done
           fi
 
       - name: Install required packages
@@ -43,6 +61,7 @@ jobs:
             dbus-x11 x11-xserver-utils \
             xdg-utils \
             curl jq rsync \
+            epiphany-browser \
             fonts-dejavu-core
 
       - name: Configure desktop, VNC and browser fallback
@@ -52,13 +71,14 @@ jobs:
           mkdir -p "$HOME/.vnc"
           mkdir -p "$HOME/.local/bin"
           mkdir -p "$HOME/.local/share/applications"
-          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.cache" "$HOME/Downloads"
           touch "$HOME/.Xresources"
           touch "$HOME/.Xauthority"
 
+          # VNC password
           echo "password" | vncpasswd -f > "$HOME/.vnc/passwd"
           chmod 600 "$HOME/.vnc/passwd"
 
+          # XFCE startup
           cat > "$HOME/.vnc/xstartup" <<'EOF'
           #!/bin/sh
           unset SESSION_MANAGER
@@ -69,6 +89,7 @@ jobs:
           EOF
           chmod +x "$HOME/.vnc/xstartup"
 
+          # Browser fallback wrapper
           cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
           #!/bin/sh
           URL="${1:-https://www.google.com}"
@@ -98,6 +119,7 @@ jobs:
           EOF
           chmod +x "$HOME/.local/bin/browser-fallback"
 
+          # Default browser desktop file
           cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
           [Desktop Entry]
           Name=Web Browser
@@ -118,60 +140,77 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$STATE_DIR/home"
+          PERSIST_HOME="$PERSIST_DIR/home"
+          mkdir -p "$PERSIST_HOME"
 
-          backup_loop() {
-            while true; do
-              mkdir -p "$STATE_DIR/home"
-              rsync -a \
-                --exclude '.cache/mozilla' \
-                --exclude '.cache/chromium' \
-                --exclude '.cache/google-chrome' \
-                --exclude '.cache/epiphany' \
-                --exclude '.npm' \
-                --exclude '.cargo' \
-                "$HOME/" "$STATE_DIR/home/" >/tmp/state-sync.log 2>&1 || true
-              sleep 180
+          sync_state() {
+            mkdir -p "$PERSIST_HOME"
+            for item in \
+              ".vnc" \
+              ".local/bin" \
+              ".local/share/applications" \
+              ".config/xfce4" \
+              ".config/epiphany" \
+              ".local/share/epiphany" \
+              ".config/chromium" \
+              ".config/google-chrome" \
+              ".mozilla/firefox" \
+              "Downloads" \
+              "Desktop" \
+              "Documents"
+            do
+              if [ -e "$HOME/$item" ]; then
+                mkdir -p "$PERSIST_HOME/$(dirname "$item")"
+                rsync -a "$HOME/$item/" "$PERSIST_HOME/$item/" || true
+              fi
             done
           }
 
-          backup_loop &
-          BACKUP_PID=$!
+          stop_bg() {
+            if [ -n "${BACKUP_PID:-}" ] && kill -0 "$BACKUP_PID" 2>/dev/null; then
+              kill "$BACKUP_PID" 2>/dev/null || true
+              wait "$BACKUP_PID" 2>/dev/null || true
+            fi
+          }
 
           cleanup() {
-            set +e
-            kill "$BACKUP_PID" >/dev/null 2>&1 || true
-
-            vncserver -kill :1 >/dev/null 2>&1 || true
-
-            mkdir -p "$STATE_DIR/home"
-            rsync -a \
-              --exclude '.cache/mozilla' \
-              --exclude '.cache/chromium' \
-              --exclude '.cache/google-chrome' \
-              --exclude '.cache/epiphany' \
-              --exclude '.npm' \
-              --exclude '.cargo' \
-              "$HOME/" "$STATE_DIR/home/" >/tmp/final-sync.log 2>&1 || true
+            stop_bg
+            sync_state || true
           }
+
           trap cleanup EXIT INT TERM
 
+          # Start VNC display :1 -> port 5901
           vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
           sleep 3
 
+          # Start noVNC proxy
           websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
           sleep 2
 
+          # Download cloudflared
           curl -L --fail -o cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
 
+          # Start periodic persistence loop
+          backup_loop() {
+            while true; do
+              sync_state
+              sleep 180
+            done
+          }
+          backup_loop &
+          BACKUP_PID=$!
+
+          # Start tunnel
           nohup ./cloudflared tunnel \
             --url http://127.0.0.1:6080 \
             --no-autoupdate \
             --logfile /tmp/cloudflared.log \
             >/tmp/cloudflared.stdout 2>&1 &
 
+          # Wait for public URL
           PUBLIC_URL=""
           for i in $(seq 1 60); do
             PUBLIC_URL=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
@@ -193,26 +232,8 @@ jobs:
           echo "Desktop URL: $PUBLIC_URL"
           echo "Desktop URL: $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
 
-          # کمی کمتر از timeout تا مرحله‌های save هم برسند
-          sleep 21000
+          # Save immediately once after startup too
+          sync_state
 
-      - name: Save final state to cache dir
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$STATE_DIR/home"
-          rsync -a \
-            --exclude '.cache/mozilla' \
-            --exclude '.cache/chromium' \
-            --exclude '.cache/google-chrome' \
-            --exclude '.cache/epiphany' \
-            --exclude '.npm' \
-            --exclude '.cargo' \
-            "$HOME/" "$STATE_DIR/home/" || true
-
-      - name: Save persisted state cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: persisted-state
-          key: ${{ env.HOME_CACHE_KEY }}
+          # Keep job alive
+          sleep 21600
