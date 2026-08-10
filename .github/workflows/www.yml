@@ -1,239 +1,274 @@
-name: Web De45554sktop with noVNC & Cloudflare Tunnel
+name: Web Desktop with Selkies & Cloudflare Tunnel
 
 on:
   workflow_dispatch:
 
-env:
-  PERSIST_DIR: ${{ github.workspace }}/persist
+permissions:
+  contents: read
 
 jobs:
   desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 355
 
+    env:
+      DESKTOP_USER: desktop
+      DESKTOP_PASSWORD: ${{ secrets.SELKIES_PASSWORD }}
+
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Restore persistent state cache
-        id: persist-cache
-        uses: actions/cache@v6
-        with:
-          path: persist
-          key: desktop-state-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            desktop-state-${{ runner.os }}-
-
-      - name: Merge restored state into home
+      - name: Validate required secret
+        shell: bash
         run: |
           set -euo pipefail
-          PERSIST_HOME="$PERSIST_DIR/home"
-          if [ -d "$PERSIST_HOME" ]; then
-            for item in \
-              ".vnc" \
-              ".local/bin" \
-              ".local/share/applications" \
-              ".config/xfce4" \
-              ".config/epiphany" \
-              ".local/share/epiphany" \
-              ".config/chromium" \
-              ".config/google-chrome" \
-              ".mozilla/firefox" \
-              "Downloads" \
-              "Desktop" \
-              "Documents"
-            do
-              if [ -e "$PERSIST_HOME/$item" ]; then
-                mkdir -p "$HOME/$(dirname "$item")"
-                rsync -a "$PERSIST_HOME/$item/" "$HOME/$item/" || true
-              fi
-            done
+
+          if [ -z "${DESKTOP_PASSWORD}" ]; then
+            echo "::error::Secret SELKIES_PASSWORD is missing."
+            echo "Create it at: Settings -> Secrets and variables -> Actions."
+            exit 1
           fi
 
-      - name: Install required packages
-        run: |
-          set -e
-          sudo apt-get update
-          sudo apt-get install -y \
-            xfce4 xfce4-goodies \
-            tigervnc-standalone-server \
-            novnc websockify \
-            dbus-x11 x11-xserver-utils \
-            xdg-utils \
-            curl jq rsync \
-            epiphany-browser \
-            fonts-dejavu-core
-
-      - name: Configure desktop, VNC and browser fallback
+      - name: Create Selkies XFCE image files
+        shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$HOME/.vnc"
-          mkdir -p "$HOME/.local/bin"
-          mkdir -p "$HOME/.local/share/applications"
-          touch "$HOME/.Xresources"
-          touch "$HOME/.Xauthority"
+          mkdir -p root/defaults
 
-          # VNC password
-          echo "password" | vncpasswd -f > "$HOME/.vnc/passwd"
-          chmod 600 "$HOME/.vnc/passwd"
+          cat > Dockerfile <<'EOF'
+          FROM ghcr.io/linuxserver/baseimage-selkies:debiantrixie
 
-          # XFCE startup
-          cat > "$HOME/.vnc/xstartup" <<'EOF'
-          #!/bin/sh
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          touch "$HOME/.Xresources"
-          xrdb "$HOME/.Xresources"
+          USER root
+
+          RUN apt-get update && \
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                xfce4 \
+                xfce4-goodies \
+                dbus-x11 \
+                xdg-utils \
+                firefox-esr \
+                xterm \
+                fonts-dejavu-core \
+                ca-certificates && \
+              apt-get clean && \
+              rm -rf /var/lib/apt/lists/*
+
+          COPY root/ /
+          RUN chmod +x /defaults/startwm.sh /usr/local/bin/browser-fallback
+          EOF
+
+          cat > root/defaults/startwm.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+
+          mkdir -p /config/.config/autostart
+
+          cat > /config/.config/autostart/browser.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Web Browser
+          Exec=/usr/local/bin/browser-fallback https://www.google.com
+          Terminal=false
+          X-GNOME-Autostart-enabled=true
+          DESKTOP
+
           exec dbus-launch --exit-with-session startxfce4
           EOF
-          chmod +x "$HOME/.vnc/xstartup"
 
-          # Browser fallback wrapper
-          cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
-          #!/bin/sh
+          mkdir -p root/usr/local/bin
+
+          cat > root/usr/local/bin/browser-fallback <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+
           URL="${1:-https://www.google.com}"
 
-          if command -v epiphany-browser >/dev/null 2>&1; then
-              exec epiphany-browser "$URL"
-          fi
+          for browser in firefox-esr firefox epiphany-browser chromium chromium-browser google-chrome; do
+            if command -v "$browser" >/dev/null 2>&1; then
+              exec "$browser" "$URL"
+            fi
+          done
 
-          if command -v firefox >/dev/null 2>&1; then
-              exec firefox "$URL"
-          fi
-
-          if command -v chromium >/dev/null 2>&1; then
-              exec chromium "$URL"
-          fi
-
-          if command -v chromium-browser >/dev/null 2>&1; then
-              exec chromium-browser "$URL"
-          fi
-
-          if command -v google-chrome >/dev/null 2>&1; then
-              exec google-chrome "$URL"
-          fi
-
-          echo "No supported browser found."
+          echo "No supported browser was found." >&2
           exit 1
           EOF
-          chmod +x "$HOME/.local/bin/browser-fallback"
 
-          # Default browser desktop file
-          cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
-          [Desktop Entry]
-          Name=Web Browser
-          Comment=Fallback Web Browser
-          Exec=$HOME/.local/bin/browser-fallback %u
-          Terminal=false
-          Type=Application
-          Categories=Network;WebBrowser;
-          MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
-          EOF
+      - name: Build Selkies XFCE image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --tag selkies-xfce:local .
 
-          xdg-mime default browser-fallback.desktop x-scheme-handler/http || true
-          xdg-mime default browser-fallback.desktop x-scheme-handler/https || true
-          xdg-mime default browser-fallback.desktop text/html || true
-          xdg-settings set default-web-browser browser-fallback.desktop || true
-
-      - name: Start services and expose with Cloudflare
+      - name: Start Selkies desktop
+        shell: bash
         run: |
           set -euo pipefail
 
-          PERSIST_HOME="$PERSIST_DIR/home"
-          mkdir -p "$PERSIST_HOME"
+          docker run -d \
+            --name selkies-desktop \
+            --shm-size=2gb \
+            -p 127.0.0.1:3000:3000 \
+            -e CUSTOM_USER="${DESKTOP_USER}" \
+            -e PASSWORD="${DESKTOP_PASSWORD}" \
+            -e TITLE="GitHub Selkies Desktop" \
+            -e SELKIES_USE_CPU="true|locked" \
+            -e SELKIES_ENCODER="x264enc,jpeg" \
+            -e SELKIES_FRAMERATE="30" \
+            -e SELKIES_MANUAL_WIDTH="1280" \
+            -e SELKIES_MANUAL_HEIGHT="720" \
+            -e SELKIES_AUDIO_ENABLED="false|locked" \
+            -e SELKIES_MICROPHONE_ENABLED="false|locked" \
+            -e SELKIES_UI_TITLE="GitHub Desktop" \
+            -v selkies-config:/config \
+            selkies-xfce:local
 
-          sync_state() {
-            mkdir -p "$PERSIST_HOME"
-            for item in \
-              ".vnc" \
-              ".local/bin" \
-              ".local/share/applications" \
-              ".config/xfce4" \
-              ".config/epiphany" \
-              ".local/share/epiphany" \
-              ".config/chromium" \
-              ".config/google-chrome" \
-              ".mozilla/firefox" \
-              "Downloads" \
-              "Desktop" \
-              "Documents"
-            do
-              if [ -e "$HOME/$item" ]; then
-                mkdir -p "$PERSIST_HOME/$(dirname "$item")"
-                rsync -a "$HOME/$item/" "$PERSIST_HOME/$item/" || true
-              fi
-            done
-          }
+      - name: Local Selkies readiness and HTTP tests
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          stop_bg() {
-            if [ -n "${BACKUP_PID:-}" ] && kill -0 "$BACKUP_PID" 2>/dev/null; then
-              kill "$BACKUP_PID" 2>/dev/null || true
-              wait "$BACKUP_PID" 2>/dev/null || true
+          echo "Waiting for Selkies HTTP service..."
+
+          for i in $(seq 1 90); do
+            if curl --fail --silent --show-error \
+              --user "${DESKTOP_USER}:${DESKTOP_PASSWORD}" \
+              --max-time 10 \
+              http://127.0.0.1:3000/ \
+              -o /tmp/selkies.html; then
+              break
             fi
-          }
 
-          cleanup() {
-            stop_bg
-            sync_state || true
-          }
+            if ! docker ps --format '{{.Names}}' | grep -qx 'selkies-desktop'; then
+              echo "::error::Selkies container stopped unexpectedly."
+              docker logs selkies-desktop || true
+              exit 1
+            fi
 
-          trap cleanup EXIT INT TERM
+            sleep 2
+          done
 
-          # Start VNC display :1 -> port 5901
-          vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
-          sleep 3
+          test -s /tmp/selkies.html
 
-          # Start noVNC proxy
-          websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
-          sleep 2
+          if ! grep -qi "selkies" /tmp/selkies.html; then
+            echo "::error::The service replied, but the page does not look like Selkies."
+            head -n 80 /tmp/selkies.html || true
+            exit 1
+          fi
 
-          # Download cloudflared
-          curl -L --fail -o cloudflared \
+          echo "Local Selkies HTTP test passed."
+
+      - name: Install cloudflared
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --fail --location --retry 3 \
+            --output /usr/local/bin/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
 
-          # Start periodic persistence loop
-          backup_loop() {
-            while true; do
-              sync_state
-              sleep 180
-            done
-          }
-          backup_loop &
-          BACKUP_PID=$!
+          chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
 
-          # Start tunnel
-          nohup ./cloudflared tunnel \
-            --url http://127.0.0.1:6080 \
+      - name: Start Cloudflare tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:3000 \
+            --protocol http2 \
             --no-autoupdate \
+            --loglevel info \
             --logfile /tmp/cloudflared.log \
             >/tmp/cloudflared.stdout 2>&1 &
 
-          # Wait for public URL
           PUBLIC_URL=""
-          for i in $(seq 1 60); do
-            PUBLIC_URL=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
-            if [ -n "$PUBLIC_URL" ]; then
+
+          for i in $(seq 1 90); do
+            PUBLIC_URL="$(
+              grep -hEo 'https://[-a-z0-9]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log /tmp/cloudflared.stdout 2>/dev/null \
+                | head -n 1 || true
+            )"
+
+            if [ -n "${PUBLIC_URL}" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "${PUBLIC_URL}" ]; then
+            echo "::error::Cloudflare Quick Tunnel did not return a public URL."
+            echo "--- cloudflared log ---"
+            cat /tmp/cloudflared.log || true
+            echo "--- cloudflared stdout ---"
+            cat /tmp/cloudflared.stdout || true
+            exit 1
+          fi
+
+          echo "PUBLIC_URL=${PUBLIC_URL}" >> "${GITHUB_ENV}"
+
+      - name: Public tunnel end-to-end test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Testing the public Cloudflare URL..."
+
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              --location \
+              --user "${DESKTOP_USER}:${DESKTOP_PASSWORD}" \
+              --max-time 20 \
+              "${PUBLIC_URL}" \
+              -o /tmp/public-selkies.html; then
               break
             fi
             sleep 2
           done
 
-          if [ -z "$PUBLIC_URL" ]; then
-            echo "Cloudflared failed."
-            echo "--- cloudflared.log ---"
-            cat /tmp/cloudflared.log || true
-            echo "--- cloudflared.stdout ---"
-            cat /tmp/cloudflared.stdout || true
+          test -s /tmp/public-selkies.html
+
+          if ! grep -qi "selkies" /tmp/public-selkies.html; then
+            echo "::error::Public URL responded but did not serve the Selkies page."
+            head -n 80 /tmp/public-selkies.html || true
             exit 1
           fi
 
-          echo "Desktop URL: $PUBLIC_URL"
-          echo "Desktop URL: $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Public Cloudflare tunnel HTTP test passed."
 
-          # Save immediately once after startup too
-          sync_state
+      - name: Publish desktop link
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # Keep job alive
-          sleep 21600
+          {
+            echo "## ✅ Selkies Desktop is ready"
+            echo
+            echo "- **Desktop URL:** ${PUBLIC_URL}"
+            echo "- **Username:** \`${DESKTOP_USER}\`"
+            echo "- **Password:** value of the \`SELKIES_PASSWORD\` Actions secret"
+            echo "- **Resolution:** 1280×720"
+            echo "- **Encoder:** CPU / x264"
+            echo
+            echo "> The link works only while this GitHub Actions job remains running."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          echo "Desktop URL: ${PUBLIC_URL}"
+          echo "Username: ${DESKTOP_USER}"
+          echo "Password: use the SELKIES_PASSWORD secret value."
+
+      - name: Keep desktop alive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while true; do
+            if ! docker ps --format '{{.Names}}' | grep -qx 'selkies-desktop'; then
+              echo "::error::Selkies container stopped."
+              docker logs selkies-desktop || true
+              exit 1
+            fi
+
+            sleep 60
+          done
