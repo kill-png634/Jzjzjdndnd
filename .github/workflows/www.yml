@@ -1,4 +1,4 @@
-name: Lightweight Web Desktop with Openbox + KasmVNC + Cloudflare
+name: Web Desktop with noVNC & Cloudflare Tunnel
 
 on:
   workflow_dispatch:
@@ -8,172 +8,107 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
+    env:
+      STATE_DIR: ${{ github.workspace }}/persisted-state
+      HOME_CACHE_KEY: web-desktop-state-v3-${{ runner.os }}
+
     steps:
-      - name: Install lightweight desktop
+      - name: Restore persisted state
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            persisted-state
+          key: ${{ env.HOME_CACHE_KEY }}
+          restore-keys: |
+            web-desktop-state-v3-${{ runner.os }}-
+
+      - name: Restore files into HOME
         run: |
           set -euo pipefail
+          mkdir -p "$STATE_DIR"
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.cache" "$HOME/.vnc" "$HOME/Downloads"
 
+          # Restore previous session data if it exists
+          if [ -d "$STATE_DIR/home" ]; then
+            rsync -a "$STATE_DIR/home/" "$HOME/" || true
+          fi
+
+      - name: Install required packages
+        run: |
+          set -e
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            openbox \
-            xterm \
-            dbus-x11 \
-            x11-xserver-utils \
+          sudo apt-get install -y \
+            xfce4 xfce4-goodies \
+            tigervnc-standalone-server \
+            novnc websockify \
+            dbus-x11 x11-xserver-utils \
             xdg-utils \
-            curl \
-            wget \
-            ca-certificates \
-            jq \
-            fonts-dejavu-core \
-            net-tools \
-            iproute2
+            curl jq rsync \
+            epiphany-browser \
+            fonts-dejavu-core
 
-      - name: Install KasmVNC
-        run: |
-          set -euo pipefail
-
-          echo "=========================================="
-          echo " Installing KasmVNC"
-          echo "=========================================="
-
-          ARCH="$(dpkg --print-architecture)"
-          . /etc/os-release
-          CODENAME="${VERSION_CODENAME:-}"
-
-          echo "Architecture: $ARCH"
-          echo "Codename: $CODENAME"
-
-          RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/kasmtech/KasmVNC/releases/latest)"
-
-          PACKAGE_URL="$(
-            printf '%s' "$RELEASE_JSON" | jq -r \
-              --arg codename "$CODENAME" \
-              --arg arch "$ARCH" '
-                [ .assets[].browser_download_url
-                  | select(test("kasmvncserver_.*" + $codename + ".*_" + $arch + "\\.deb$"; "i"))
-                ][0] // empty
-              '
-          )"
-
-          if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
-            PACKAGE_URL="$(
-              printf '%s' "$RELEASE_JSON" | jq -r \
-                --arg arch "$ARCH" '
-                  [ .assets[].browser_download_url
-                    | select(test("kasmvncserver_.*_" + $arch + "\\.deb$"; "i"))
-                  ][0] // empty
-                '
-            )"
-          fi
-
-          if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
-            echo "Could not find a matching KasmVNC .deb asset in the latest release."
-            echo "Available assets:"
-            printf '%s' "$RELEASE_JSON" | jq -r '.assets[].name'
-            exit 1
-          fi
-
-          echo "Using package: $PACKAGE_URL"
-
-          wget -O /tmp/kasmvnc.deb "$PACKAGE_URL"
-          sudo apt-get install -y /tmp/kasmvnc.deb
-
-          echo "KasmVNC installed."
-
-      - name: Configure Openbox and KasmVNC
+      - name: Configure desktop, VNC and browser fallback
         run: |
           set -euo pipefail
 
           mkdir -p "$HOME/.vnc"
-          mkdir -p "$HOME/.config/openbox"
           mkdir -p "$HOME/.local/bin"
           mkdir -p "$HOME/.local/share/applications"
-
+          mkdir -p "$HOME/.config" "$HOME/.local/share" "$HOME/.cache" "$HOME/Downloads"
           touch "$HOME/.Xresources"
+          touch "$HOME/.Xauthority"
 
           # VNC password
-          printf '%s\n%s\n' "password" "password" | vncpasswd -u "$USER" "$HOME/.vnc/passwd"
+          echo "password" | vncpasswd -f > "$HOME/.vnc/passwd"
           chmod 600 "$HOME/.vnc/passwd"
 
-          # Openbox configuration
-          cat > "$HOME/.config/openbox/rc.xml" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <openbox_config xmlns="http://openbox.org/3.4/rc">
-            <focus>
-              <focusNew>yes</focusNew>
-              <followMouse>no</followMouse>
-              <focusLast>yes</focusLast>
-              <underMouse>no</underMouse>
-              <raiseOnFocus>no</raiseOnFocus>
-            </focus>
-            <desktops>
-              <number>1</number>
-              <firstdesk>1</firstdesk>
-            </desktops>
-            <applications>
-              <application class="*">
-                <decor>yes</decor>
-              </application>
-            </applications>
-          </openbox_config>
-          EOF
-
-          # Startup script
+          # XFCE startup
           cat > "$HOME/.vnc/xstartup" <<'EOF'
           #!/bin/sh
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
-
-          export XDG_CURRENT_DESKTOP=Openbox
-          export XDG_SESSION_DESKTOP=Openbox
-
-          xrdb "$HOME/.Xresources" || true
-
-          if command -v dbus-launch >/dev/null 2>&1; then
-              exec dbus-launch --exit-with-session openbox-session
-          else
-              exec openbox-session
-          fi
+          touch "$HOME/.Xresources"
+          xrdb "$HOME/.Xresources"
+          exec dbus-launch --exit-with-session startxfce4
           EOF
-
           chmod +x "$HOME/.vnc/xstartup"
 
-          # Browser launcher
+          # Browser fallback wrapper
           cat > "$HOME/.local/bin/browser-fallback" <<'EOF'
           #!/bin/sh
           URL="${1:-https://www.google.com}"
 
-          if command -v chromium >/dev/null 2>&1; then
-            exec chromium \
-              --disable-gpu \
-              --disable-dev-shm-usage \
-              --no-sandbox \
-              "$URL"
-          fi
-
-          if command -v chromium-browser >/dev/null 2>&1; then
-            exec chromium-browser \
-              --disable-gpu \
-              --disable-dev-shm-usage \
-              --no-sandbox \
-              "$URL"
+          if command -v epiphany-browser >/dev/null 2>&1; then
+              exec epiphany-browser "$URL"
           fi
 
           if command -v firefox >/dev/null 2>&1; then
-            exec firefox "$URL"
+              exec firefox "$URL"
+          fi
+
+          if command -v chromium >/dev/null 2>&1; then
+              exec chromium "$URL"
+          fi
+
+          if command -v chromium-browser >/dev/null 2>&1; then
+              exec chromium-browser "$URL"
+          fi
+
+          if command -v google-chrome >/dev/null 2>&1; then
+              exec google-chrome "$URL"
           fi
 
           echo "No supported browser found."
           exit 1
           EOF
-
           chmod +x "$HOME/.local/bin/browser-fallback"
 
-          # Desktop launcher
+          # Default browser desktop file
           cat > "$HOME/.local/share/applications/browser-fallback.desktop" <<EOF
           [Desktop Entry]
           Name=Web Browser
-          Comment=Lightweight Web Browser
+          Comment=Fallback Web Browser
           Exec=$HOME/.local/bin/browser-fallback %u
           Terminal=false
           Type=Application
@@ -184,125 +119,111 @@ jobs:
           xdg-mime default browser-fallback.desktop x-scheme-handler/http || true
           xdg-mime default browser-fallback.desktop x-scheme-handler/https || true
           xdg-mime default browser-fallback.desktop text/html || true
+          xdg-settings set default-web-browser browser-fallback.desktop || true
 
-      - name: Start KasmVNC and Cloudflare
+      - name: Start services and expose with Cloudflare
         run: |
           set -euo pipefail
 
-          echo "=========================================="
-          echo " Starting lightweight desktop"
-          echo "=========================================="
+          mkdir -p "$STATE_DIR/home"
 
-          vncserver -kill :1 >/dev/null 2>&1 || true
+          # Start periodic state backup in background
+          (
+            set +e
+            while true; do
+              mkdir -p "$STATE_DIR/home"
+              rsync -a --delete \
+                --exclude '.cache/mozilla' \
+                --exclude '.cache/chromium' \
+                --exclude '.cache/google-chrome' \
+                --exclude '.cache/epiphany' \
+                --exclude '.npm' \
+                --exclude '.cargo' \
+                "$HOME/" "$STATE_DIR/home/" >/tmp/state-sync.log 2>&1
+              sleep 300
+            done
+          ) &
+          BACKUP_PID=$!
+          echo "$BACKUP_PID" > /tmp/backup.pid
 
-          # Start KasmVNC
-          vncserver :1 \
-            -geometry 1280x720 \
-            -depth 24 \
-            -localhost yes
+          cleanup() {
+            set +e
+            kill "$BACKUP_PID" >/dev/null 2>&1 || true
 
-          sleep 5
+            mkdir -p "$STATE_DIR/home"
+            rsync -a \
+              --exclude '.cache/mozilla' \
+              --exclude '.cache/chromium' \
+              --exclude '.cache/google-chrome' \
+              --exclude '.cache/epiphany' \
+              --exclude '.npm' \
+              --exclude '.cargo' \
+              "$HOME/" "$STATE_DIR/home/" >/tmp/final-sync.log 2>&1 || true
+          }
+          trap cleanup EXIT
 
-          echo "KasmVNC started."
+          # Start VNC display :1 -> port 5901
+          vncserver :1 -geometry 1280x720 -depth 24 -localhost yes
+          sleep 3
 
-          WEB_PORT="6901"
+          # Start noVNC proxy
+          websockify --web=/usr/share/novnc/ 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
+          sleep 2
 
-          # Wait for the web port to come up
-          for i in $(seq 1 30); do
-            if ss -lntp 2>/dev/null | grep -q ":${WEB_PORT} "; then
-              break
-            fi
-            sleep 2
-          done
-
-          if ! ss -lntp 2>/dev/null | grep -q ":${WEB_PORT} "; then
-            echo "Warning: KasmVNC web port ${WEB_PORT} not detected yet."
-            ss -lntp || true
-          fi
-
-          # Cloudflared
-          curl -L --fail \
-            -o /tmp/cloudflared \
+          # Download cloudflared
+          curl -L --fail -o cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
 
-          chmod +x /tmp/cloudflared
-
-          # Start Cloudflare Quick Tunnel
-          nohup /tmp/cloudflared tunnel \
-            --url "https://127.0.0.1:${WEB_PORT}" \
-            --no-tls-verify \
+          # Start tunnel
+          nohup ./cloudflared tunnel \
+            --url http://127.0.0.1:6080 \
             --no-autoupdate \
             --logfile /tmp/cloudflared.log \
             >/tmp/cloudflared.stdout 2>&1 &
 
-          echo "Waiting for Cloudflare URL..."
-
+          # Wait for public URL
           PUBLIC_URL=""
-
-          for i in $(seq 1 90); do
-            PUBLIC_URL="$(
-              grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log 2>/dev/null | head -n 1 || true
-            )"
-
+          for i in $(seq 1 60); do
+            PUBLIC_URL=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
             if [ -n "$PUBLIC_URL" ]; then
               break
             fi
-
-            PUBLIC_URL="$(
-              grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.stdout 2>/dev/null | head -n 1 || true
-            )"
-
-            if [ -n "$PUBLIC_URL" ]; then
-              break
-            fi
-
             sleep 2
           done
 
           if [ -z "$PUBLIC_URL" ]; then
-            echo "Cloudflare Tunnel failed."
-
-            echo "========== cloudflared.log =========="
+            echo "Cloudflared failed."
+            echo "--- cloudflared.log ---"
             cat /tmp/cloudflared.log || true
-
-            echo "========== cloudflared.stdout =========="
+            echo "--- cloudflared.stdout ---"
             cat /tmp/cloudflared.stdout || true
-
             exit 1
           fi
 
-          echo ""
-          echo "=========================================="
-          echo " DESKTOP READY"
-          echo "=========================================="
-          echo ""
-          echo "Desktop URL:"
-          echo "$PUBLIC_URL"
-          echo ""
-          echo "Password:"
-          echo "password"
-          echo ""
+          echo "Desktop URL: $PUBLIC_URL"
+          echo "Desktop URL: $PUBLIC_URL" >> "$GITHUB_STEP_SUMMARY"
 
-          {
-            echo "## 🖥️ Lightweight Web Desktop"
-            echo ""
-            echo "**Desktop URL:** $PUBLIC_URL"
-            echo ""
-            echo "**Password:** `password`"
-            echo ""
-            echo "**Web Port:** $WEB_PORT"
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Keep job alive
+          sleep 21600
 
-          while true; do
-            sleep 60
+      - name: Save final state to cache dir
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$STATE_DIR/home"
+          rsync -a \
+            --exclude '.cache/mozilla' \
+            --exclude '.cache/chromium' \
+            --exclude '.cache/google-chrome' \
+            --exclude '.cache/epiphany' \
+            --exclude '.npm' \
+            --exclude '.cargo' \
+            "$HOME/" "$STATE_DIR/home/" || true
 
-            if ! pgrep -f "cloudflared tunnel" >/dev/null; then
-              echo "Cloudflare process stopped."
-              exit 1
-            fi
-
-            if ! pgrep -f "vncserver" >/dev/null && ! pgrep -f "Xvnc" >/dev/null; then
-              echo "VNC process stopped."
-              exit 1
-            fi
-          done
+      - name: Save persisted state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: persisted-state
+          key: ${{ env.HOME_CACHE_KEY }}
