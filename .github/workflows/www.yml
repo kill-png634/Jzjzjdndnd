@@ -128,12 +128,14 @@ jobs:
 
           echo "Waiting for Selkies HTTP service..."
 
+          OK=0
           for i in $(seq 1 90); do
             if curl --fail --silent --show-error \
               --user "${DESKTOP_USER}:${DESKTOP_PASSWORD}" \
               --max-time 10 \
               http://127.0.0.1:3000/ \
               -o /tmp/selkies.html; then
+              OK=1
               break
             fi
 
@@ -146,26 +148,36 @@ jobs:
             sleep 2
           done
 
-          test -s /tmp/selkies.html
-
-          if ! grep -qi "selkies" /tmp/selkies.html; then
-            echo "::error::The service replied, but the page does not look like Selkies."
-            head -n 80 /tmp/selkies.html || true
+          if [ "${OK}" -ne 1 ]; then
+            echo "::error::Selkies HTTP service never responded successfully."
+            docker logs --tail 200 selkies-desktop || true
             exit 1
           fi
 
-          echo "Local Selkies HTTP test passed."
+          test -s /tmp/selkies.html
+
+          # The new Selkies web client is a Vue/React SPA whose initial HTML
+          # is a shell (no literal "selkies" word). Detect the SPA markers
+          # instead of grepping for the product name.
+          if grep -qE 'id="app"|manifest\.json|apple-touch-icon|assets/index-.*\.js' /tmp/selkies.html; then
+            echo "Local Selkies HTTP test passed (SPA shell detected)."
+          else
+            echo "::error::The service replied, but the page does not look like the Selkies web client."
+            echo "--- first 80 lines of response ---"
+            head -n 80 /tmp/selkies.html || true
+            exit 1
+          fi
 
       - name: Install cloudflared
         shell: bash
         run: |
           set -euo pipefail
 
-          curl --fail --location --retry 3 \
+          sudo curl --fail --location --retry 3 \
             --output /usr/local/bin/cloudflared \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
 
-          chmod +x /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
           cloudflared --version
 
       - name: Start Cloudflare tunnel
@@ -215,6 +227,7 @@ jobs:
 
           echo "Testing the public Cloudflare URL..."
 
+          OK=0
           for i in $(seq 1 30); do
             if curl --fail --silent --show-error \
               --location \
@@ -222,20 +235,26 @@ jobs:
               --max-time 20 \
               "${PUBLIC_URL}" \
               -o /tmp/public-selkies.html; then
+              OK=1
               break
             fi
             sleep 2
           done
 
-          test -s /tmp/public-selkies.html
-
-          if ! grep -qi "selkies" /tmp/public-selkies.html; then
-            echo "::error::Public URL responded but did not serve the Selkies page."
-            head -n 80 /tmp/public-selkies.html || true
+          if [ "${OK}" -ne 1 ]; then
+            echo "::error::Public Cloudflare URL never responded successfully."
             exit 1
           fi
 
-          echo "Public Cloudflare tunnel HTTP test passed."
+          test -s /tmp/public-selkies.html
+
+          if grep -qE 'id="app"|manifest\.json|apple-touch-icon|assets/index-.*\.js' /tmp/public-selkies.html; then
+            echo "Public Cloudflare tunnel HTTP test passed (SPA shell detected)."
+          else
+            echo "::error::Public URL responded but did not serve the Selkies web client."
+            head -n 80 /tmp/public-selkies.html || true
+            exit 1
+          fi
 
       - name: Publish desktop link
         shell: bash
