@@ -1,0 +1,328 @@
+name: Kali Web Desktop with Selkies & Cloudflare Tunnel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    env:
+      DESKTOP_USER: desktop
+      DESKTOP_PASSWORD: ${{ secrets.SELKIES_PASSWORD }}
+
+    steps:
+      - name: Check login settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${DESKTOP_PASSWORD}" ]; then
+            echo "::warning::SELKIES_PASSWORD secret is not set — the desktop will be reachable WITHOUT a password. Anyone who has the link gets full access."
+            echo "AUTH_MODE=open" >> "${GITHUB_ENV}"
+          else
+            echo "Password login enabled (SELKIES_PASSWORD secret found)."
+            echo "AUTH_MODE=basic" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Create Kali customization files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p root/usr/local/bin
+
+          # ---- Dockerfile: Kali + Google Chrome (no Firefox) + fonts + keyboard fix ----
+          cat > Dockerfile <<'DOCKERFILE_EOF'
+          # syntax=docker/dockerfile:1
+          FROM lsiobase/selkies:kali
+
+          SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          RUN apt-get update \
+           && apt-get install -y --no-install-recommends \
+                locales \
+                fonts-dejavu fonts-dejavu-core fonts-dejavu-extra \
+                fonts-liberation fonts-liberation2 \
+                fonts-noto fonts-noto-color-emoji \
+                dbus-x11 xdg-utils curl ca-certificates gnupg wget \
+                apt-transport-https x11-xkb-utils xkb-data \
+           && sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+           && locale-gen \
+           && printf 'XKBMODEL="pc105"\nXKBLAYOUT="us"\nXKBVARIANT=""\nXKBOPTIONS=""\n' > /etc/default/keyboard \
+           && install -m 0755 -d /etc/apt/keyrings \
+           && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google.gpg \
+           && chmod a+r /etc/apt/keyrings/google.gpg \
+           && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+           && apt-get update \
+           && apt-get install -y --no-install-recommends google-chrome-stable \
+           && (apt-get purge -y firefox firefox-esr 2>/dev/null || true) \
+           && apt-get autoremove -y \
+           && update-alternatives --set x-www-browser /usr/bin/google-chrome-stable \
+           && update-alternatives --set gnome-www-browser /usr/bin/google-chrome-stable \
+           && mv /usr/bin/google-chrome-stable /usr/bin/google-chrome-real \
+           && printf '#!/bin/bash\nexec /usr/bin/google-chrome-real --no-sandbox --disable-dev-shm-usage --start-maximized "$@"\n' > /usr/bin/google-chrome-stable \
+           && chmod +x /usr/bin/google-chrome-stable \
+           && ln -sf /usr/bin/google-chrome-stable /usr/bin/google-chrome \
+           && mkdir -p /defaults/.config/autostart \
+           && printf '[Desktop Entry]\nType=Application\nName=Set Wallpaper\nExec=/usr/local/bin/set-wallpaper\nX-GNOME-Autostart-enabled=true\n' > /defaults/.config/autostart/wallpaper.desktop \
+           && printf '[Desktop Entry]\nType=Application\nName=Fix Keyboard Layout\nExec=/usr/local/bin/fix-keyboard\nX-GNOME-Autostart-enabled=true\n' > /defaults/.config/autostart/fix-keyboard.desktop \
+           && apt-get clean \
+           && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+          ENV LC_ALL=en_US.UTF-8
+
+          COPY root/ /
+          DOCKERFILE_EOF
+
+          # ---- fix-keyboard: kills the "Shift types lowercase / modifier stuck" bug ----
+          cat > root/usr/local/bin/fix-keyboard <<'FIXKEYBOARD_EOF'
+          #!/bin/bash
+          # The Selkies web client sends keycodes assuming a US layout. If the X
+          # session has a different/missing layout, Shift+key produces lowercase
+          # or modifiers appear stuck. Force a clean US pc105 layout at startup.
+          apply_fix() {
+              setxkbmap -model pc105 -layout us -option 2>/dev/null || true
+          }
+          apply_fix
+          sleep 5
+          apply_fix
+          exit 0
+          FIXKEYBOARD_EOF
+
+          # ---- set-wallpaper ----
+          cat > root/usr/local/bin/set-wallpaper <<'WALLPAPER_EOF'
+          #!/bin/bash
+          WALL=""
+          for candidate in \
+              /usr/share/backgrounds/kali/kali-light-16x9.png \
+              /usr/share/backgrounds/kali/kali-dark-16x9.png \
+              /usr/share/images/desktop-base/desktop-background \
+              /usr/share/backgrounds/*.png \
+              /usr/share/backgrounds/*.jpg
+          do
+              [ -f "$candidate" ] && WALL="$candidate" && break
+          done
+          [ -z "$WALL" ] && exit 0
+
+          # XFCE
+          if command -v xfconf-query >/dev/null 2>&1; then
+              for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true)
+              do
+                  xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" 2>/dev/null || true
+              done
+          fi
+
+          # KDE
+          if command -v plasma-apply-wallpaperimage >/dev/null 2>&1; then
+              plasma-apply-wallpaperimage "$WALL" 2>/dev/null || true
+          fi
+
+          # fallback
+          if command -v feh >/dev/null 2>&1; then
+              feh --bg-fill "$WALL" 2>/dev/null || true
+          fi
+
+          exit 0
+          WALLPAPER_EOF
+
+          chmod +x root/usr/local/bin/fix-keyboard root/usr/local/bin/set-wallpaper
+
+      - name: Build Kali Selkies image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull --tag kali-selkies:local .
+
+      - name: Start Kali desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AUTH_ARGS=()
+          if [ -n "${DESKTOP_PASSWORD}" ]; then
+            AUTH_ARGS+=(-e "PASSWORD=${DESKTOP_PASSWORD}")
+          fi
+
+          docker run -d \
+            --name selkies-desktop \
+            --shm-size=2gb \
+            -p 127.0.0.1:3000:3000 \
+            -e CUSTOM_USER="${DESKTOP_USER}" \
+            "${AUTH_ARGS[@]}" \
+            -e TITLE="Kali Web Desktop" \
+            -e SELKIES_UI_TITLE="Kali Desktop" \
+            -e LC_ALL="en_US.UTF-8" \
+            -e SELKIES_USE_CPU="true|locked" \
+            -e SELKIES_ENCODER="x264enc,jpeg" \
+            -e SELKIES_FRAMERATE="60" \
+            -e SELKIES_H264_CRF="18" \
+            -e SELKIES_JPEG_QUALITY="85" \
+            -e SELKIES_USE_PAINT_OVER_QUALITY="true" \
+            -e SELKIES_PAINT_OVER_JPEG_QUALITY="90" \
+            -e SELKIES_H264_PAINTOVER_CRF="14" \
+            -e SELKIES_USE_CSS_SCALING="true" \
+            -e SELKIES_IS_MANUAL_RESOLUTION_MODE="true|locked" \
+            -e SELKIES_MANUAL_WIDTH="1280" \
+            -e SELKIES_MANUAL_HEIGHT="720" \
+            -e SELKIES_AUDIO_ENABLED="true|locked" \
+            -e SELKIES_AUDIO_BITRATE="192000" \
+            -e SELKIES_MICROPHONE_ENABLED="false|locked" \
+            -e SELKIES_UI_SIDEBAR_SHOW_AUDIO_SETTINGS="true" \
+            -v selkies-config:/config \
+            kali-selkies:local
+
+      - name: Local Selkies readiness and HTTP tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURL_AUTH=()
+          if [ -n "${DESKTOP_PASSWORD}" ]; then
+            CURL_AUTH=(--user "${DESKTOP_USER}:${DESKTOP_PASSWORD}")
+          fi
+
+          echo "Waiting for Selkies HTTP service..."
+          OK=0
+          for i in $(seq 1 90); do
+            if curl --fail --silent --show-error \
+              "${CURL_AUTH[@]}" \
+              --max-time 10 \
+              http://127.0.0.1:3000/ \
+              -o /tmp/selkies.html; then
+              OK=1
+              break
+            fi
+            if ! docker ps --format '{{.Names}}' | grep -qx 'selkies-desktop'; then
+              echo "::error::Selkies container stopped unexpectedly."
+              docker logs selkies-desktop || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ "${OK}" -ne 1 ]; then
+            echo "::error::Selkies HTTP service never responded successfully."
+            docker logs --tail 200 selkies-desktop || true
+            exit 1
+          fi
+
+          test -s /tmp/selkies.html
+          if grep -qE 'id="app"|manifest\.json|apple-touch-icon|assets/index-.*\.js' /tmp/selkies.html; then
+            echo "Local Selkies HTTP test passed (SPA shell detected)."
+          else
+            echo "::error::The page does not look like the Selkies web client."
+            head -n 80 /tmp/selkies.html || true
+            exit 1
+          fi
+
+      - name: Install cloudflared
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo curl --fail --location --retry 3 \
+            --output /usr/local/bin/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          sudo chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Start Cloudflare tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:3000 \
+            --protocol http2 \
+            --no-autoupdate \
+            --loglevel info \
+            --logfile /tmp/cloudflared.log \
+            >/tmp/cloudflared.stdout 2>&1 &
+
+          PUBLIC_URL=""
+          for i in $(seq 1 90); do
+            PUBLIC_URL="$(grep -hEo 'https://[-a-z0-9]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log /tmp/cloudflared.stdout 2>/dev/null | head -n 1 || true)"
+            [ -n "${PUBLIC_URL}" ] && break
+            sleep 2
+          done
+
+          if [ -z "${PUBLIC_URL}" ]; then
+            echo "::error::Cloudflare Quick Tunnel did not return a public URL."
+            cat /tmp/cloudflared.log /tmp/cloudflared.stdout || true
+            exit 1
+          fi
+          echo "PUBLIC_URL=${PUBLIC_URL}" >> "${GITHUB_ENV}"
+
+      - name: Public tunnel end-to-end test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURL_AUTH=()
+          if [ -n "${DESKTOP_PASSWORD}" ]; then
+            CURL_AUTH=(--user "${DESKTOP_USER}:${DESKTOP_PASSWORD}")
+          fi
+
+          OK=0
+          for i in $(seq 1 30); do
+            if curl --fail --silent --show-error --location \
+              "${CURL_AUTH[@]}" \
+              --max-time 20 \
+              "${PUBLIC_URL}" \
+              -o /tmp/public-selkies.html; then
+              OK=1
+              break
+            fi
+            sleep 2
+          done
+
+          [ "${OK}" -eq 1 ] || { echo "::error::Public URL never responded."; exit 1; }
+          test -s /tmp/public-selkies.html
+
+          if grep -qE 'id="app"|manifest\.json|apple-touch-icon|assets/index-.*\.js' /tmp/public-selkies.html; then
+            echo "Public tunnel HTTP test passed."
+          else
+            echo "::error::Public URL did not serve the Selkies web client."
+            head -n 80 /tmp/public-selkies.html || true
+            exit 1
+          fi
+
+      - name: Publish desktop link
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## ✅ Kali Web Desktop is ready"
+            echo
+            echo "- Desktop URL: ${PUBLIC_URL}"
+            if [ "${AUTH_MODE}" = "basic" ]; then
+              echo "- Username: \`${DESKTOP_USER}\`"
+              echo "- Password: value of the \`SELKIES_PASSWORD\` Actions secret"
+            else
+              echo "- Login: **disabled** — just open the URL (no username/password needed)"
+            fi
+            echo "- Browser: Google Chrome only (Firefox removed)"
+            echo "- Resolution: 1280×720 @ 60fps (CPU / x264, CRF 18)"
+            echo "- Audio: enabled (192kbps) — microphone disabled"
+            echo
+            echo "> The link works only while this GitHub Actions job remains running."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          echo "Desktop URL: ${PUBLIC_URL}"
+
+      - name: Keep desktop alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          while true; do
+            if ! docker ps --format '{{.Names}}' | grep -qx 'selkies-desktop'; then
+              echo "::error::Selkies container stopped."
+              docker logs selkies-desktop || true
+              exit 1
+            fi
+            sleep 60
+          done
