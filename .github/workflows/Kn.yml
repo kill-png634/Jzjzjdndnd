@@ -1,4 +1,4 @@
-Name: Kali Web Desktop with Selkies & Cloudflare Tunnel
+name: Kali Web Desktop with Selkies & Cloudflare Tunnel
 
 on:
   workflow_dispatch:
