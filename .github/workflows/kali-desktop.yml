@@ -29,112 +29,150 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p root/defaults root/usr/local/bin
+          mkdir -p root/defaults root/usr/local/bin root/etc/chromium.d
 
-          cat > Dockerfile <<'DOCKERFILE'
-          FROM ghcr.io/linuxserver/baseimage-selkies:kali
+cat > Dockerfile <<'DOCKERFILE'
+FROM ghcr.io/linuxserver/baseimage-selkies:kali
 
-          ENV DEBIAN_FRONTEND=noninteractive
-          ENV LANG=en_US.UTF-8
-          ENV LC_ALL=en_US.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TITLE="Kali Web Desktop"
 
-          RUN set -eux; \
-              apt-get update; \
-              apt-get install -y --no-install-recommends \
-                ca-certificates curl gnupg wget locales \
-                xfce4 xfce4-terminal xfce4-goodies thunar \
-                dbus-x11 xdg-utils feh \
-                x11-xkb-utils xkb-data xdotool xclip \
-                fonts-noto fonts-noto-color-emoji \
-                libnss3 libxss1 libxtst6 libgtk-3-0 libgbm1 libsecret-1-0 \
-                libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libcups2; \
-              ( apt-get install -y --no-install-recommends libasound2t64 \
-                || apt-get install -y --no-install-recommends libasound2 ); \
-              sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; \
-              apt-get clean; rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg wget locales procps \
+      xfce4 xfce4-terminal xfce4-panel xfce4-settings \
+      thunar mousepad dbus-x11 xdg-utils feh \
+      x11-xkb-utils xkb-data x11-xserver-utils xdotool xclip \
+      chromium \
+      fonts-noto fonts-noto-color-emoji \
+      libnss3 libxss1 libxtst6 libgtk-3-0 libgbm1 libsecret-1-0 \
+      libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libcups2; \
+    ( apt-get install -y --no-install-recommends libasound2t64 \
+      || apt-get install -y --no-install-recommends libasound2 ); \
+    sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
 
-          # Official Claude Desktop for Linux (Anthropic apt repo)
-          RUN set -eux; \
-              curl -fsSLo /usr/share/keyrings/claude-desktop-archive-keyring.asc \
-                https://downloads.claude.ai/claude-desktop/key.asc; \
-              gpg --show-keys --with-colons /usr/share/keyrings/claude-desktop-archive-keyring.asc \
-                | grep -q '31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE'; \
-              echo 'CLAUDE_DESKTOP_ADD_REPO="false"' > /etc/default/claude-desktop; \
-              echo "deb [arch=amd64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
-                > /etc/apt/sources.list.d/claude-desktop.list; \
-              apt-get update; \
-              apt-get install -y --no-install-recommends claude-desktop; \
-              apt-get clean; rm -rf /var/lib/apt/lists/*
+# Official Claude Desktop for Linux (Anthropic apt repo)
+RUN set -eux; \
+    curl -fsSLo /usr/share/keyrings/claude-desktop-archive-keyring.asc \
+      https://downloads.claude.ai/claude-desktop/key.asc; \
+    echo 'CLAUDE_DESKTOP_ADD_REPO="false"' > /etc/default/claude-desktop; \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
+      > /etc/apt/sources.list.d/claude-desktop.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends claude-desktop; \
+    apt-get clean; rm -rf /var/lib/apt/lists/*
 
-          COPY root/ /
+# Kill screen blanking / power management (this is what turns the screen black)
+RUN set -eux; \
+    rm -f /etc/xdg/autostart/xfce4-power-manager.desktop \
+          /etc/xdg/autostart/xscreensaver.desktop \
+          /etc/xdg/autostart/xfce4-screensaver.desktop \
+          /etc/xdg/autostart/light-locker.desktop \
+          /usr/share/xfce4/panel/plugins/power-manager-plugin.desktop || true
 
-          # Electron inside Docker: no sandbox, no GPU, no gnome-keyring
-          RUN set -eux; \
-              chmod +x /usr/local/bin/claude-desktop-web \
-                       /usr/local/bin/fix-keyboard \
-                       /usr/local/bin/set-wallpaper \
-                       /defaults/startwm.sh; \
-              for f in /usr/share/applications/*laude*.desktop; do \
-                [ -e "$f" ] || continue; \
-                sed -i -E 's|^Exec=.*|Exec=/usr/local/bin/claude-desktop-web %U|' "$f"; \
-              done
-          DOCKERFILE
+COPY root/ /
 
-          cat > root/usr/local/bin/claude-desktop-web <<'EOF'
-          #!/bin/bash
-          export GDK_BACKEND=x11
-          export ELECTRON_OZONE_PLATFORM_HINT=x11
-          export CLAUDE_DISABLE_GPU=1
-          mkdir -p "$HOME/.config/Claude"
-          rm -f "$HOME/.config/Claude/SingletonLock" 2>/dev/null || true
-          exec /usr/bin/claude-desktop \
-            --no-sandbox \
-            --disable-gpu \
-            --disable-software-rasterizer \
-            --disable-dev-shm-usage \
-            --password-store=basic \
-            "$@"
-          EOF
+RUN set -eux; \
+    chmod +x /defaults/startwm.sh \
+             /usr/local/bin/claude-desktop-web \
+             /usr/local/bin/fix-keyboard \
+             /usr/local/bin/set-wallpaper; \
+    head -c 2 /defaults/startwm.sh | grep -q '#!'; \
+    for f in /usr/share/applications/*laude*.desktop; do \
+      [ -e "$f" ] || continue; \
+      sed -i -E 's|^Exec=.*|Exec=/usr/local/bin/claude-desktop-web %U|' "$f"; \
+    done; \
+    for f in /usr/share/applications/chromium*.desktop; do \
+      [ -e "$f" ] || continue; \
+      sed -i -E 's|^(Exec=[^ ]+)|\1 --no-sandbox --disable-gpu --test-type|' "$f"; \
+    done
+DOCKERFILE
 
-          cat > root/usr/local/bin/fix-keyboard <<'EOF'
-          #!/bin/bash
-          export DISPLAY="${DISPLAY:-:1}"
-          setxkbmap -model pc105 -layout us -option "" 2>/dev/null || true
-          for k in Shift_L Shift_R Control_L Control_R Alt_L Alt_R \
-                   Super_L Super_R ISO_Level3_Shift Meta_L; do
-              xdotool keyup "$k" 2>/dev/null || true
-          done
-          caps="$(xset -q 2>/dev/null | awk '/Caps Lock:/ {print $4}')"
-          if [ "$caps" = "on" ]; then
-              xdotool key --clearmodifiers Caps_Lock 2>/dev/null || true
-          fi
-          xset r rate 400 30 2>/dev/null || true
-          exit 0
-          EOF
+cat > root/etc/chromium.d/lsio-flags <<'EOF'
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-gpu --disable-dev-shm-usage --test-type"
+EOF
 
-          cat > root/usr/local/bin/set-wallpaper <<'EOF'
-          #!/bin/bash
-          WALL="${1:-/usr/share/backgrounds/kali/default}"
-          [ -f "$WALL" ] || exit 0
-          export DISPLAY="${DISPLAY:-:1}"
-          if command -v xfconf-query >/dev/null 2>&1; then
-              for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true); do
-                  xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" || true
-              done
-          fi
-          command -v feh >/dev/null 2>&1 && feh --bg-fill "$WALL" || true
-          exit 0
-          EOF
+cat > root/defaults/startwm.sh <<'EOF'
+#!/bin/bash
+exec >> /config/startwm.log 2>&1
+echo "=== startwm.sh $(date) DISPLAY=${DISPLAY:-unset} ==="
 
-          cat > root/defaults/startwm.sh <<'EOF'
-          #!/bin/bash
-          /usr/local/bin/fix-keyboard || true
-          ( sleep 8; /usr/local/bin/set-wallpaper ) >/dev/null 2>&1 &
-          xfconf-query -c xfce4-keyboard-shortcuts \
-            -p "/commands/custom/<Primary><Alt>k" -n -t string \
-            -s "/usr/local/bin/fix-keyboard" 2>/dev/null || true
-          exec /usr/bin/startxfce4
-          EOF
+export DISPLAY="${DISPLAY:-:1}"
+export XDG_CURRENT_DESKTOP=XFCE
+export XDG_SESSION_TYPE=x11
+
+# never blank the screen
+xset s off      || true
+xset s noblank  || true
+xset -dpms      || true
+
+/usr/local/bin/fix-keyboard || true
+( sleep 10; /usr/local/bin/set-wallpaper ) &
+
+xfconf-query -c xfce4-keyboard-shortcuts \
+  -p "/commands/custom/<Primary><Alt>k" -n -t string \
+  -s "/usr/local/bin/fix-keyboard" 2>/dev/null || true
+
+if command -v xfce4-session >/dev/null 2>&1; then
+    exec dbus-launch --exit-with-session /usr/bin/xfce4-session
+fi
+
+echo "!!! xfce4-session missing, falling back to openbox"
+exec dbus-launch --exit-with-session /usr/bin/openbox-session
+EOF
+
+cat > root/usr/local/bin/claude-desktop-web <<'EOF'
+#!/bin/bash
+export GDK_BACKEND=x11
+export ELECTRON_OZONE_PLATFORM_HINT=x11
+mkdir -p "$HOME/.config/Claude"
+rm -f "$HOME/.config/Claude/SingletonLock" 2>/dev/null || true
+exec /usr/bin/claude-desktop \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-software-rasterizer \
+  --disable-dev-shm-usage \
+  --password-store=basic \
+  "$@"
+EOF
+
+cat > root/usr/local/bin/fix-keyboard <<'EOF'
+#!/bin/bash
+export DISPLAY="${DISPLAY:-:1}"
+setxkbmap -model pc105 -layout us -option "" 2>/dev/null || true
+for k in Shift_L Shift_R Control_L Control_R Alt_L Alt_R \
+         Super_L Super_R ISO_Level3_Shift Meta_L; do
+    xdotool keyup "$k" 2>/dev/null || true
+done
+if [ "$(xset -q 2>/dev/null | awk '/Caps Lock:/ {print $4}')" = "on" ]; then
+    xdotool key --clearmodifiers Caps_Lock 2>/dev/null || true
+fi
+xset r rate 400 30 2>/dev/null || true
+exit 0
+EOF
+
+cat > root/usr/local/bin/set-wallpaper <<'EOF'
+#!/bin/bash
+export DISPLAY="${DISPLAY:-:1}"
+WALL="${1:-}"
+if [ -z "$WALL" ]; then
+    WALL="$(find /usr/share/backgrounds /usr/share/wallpapers \
+            -maxdepth 3 -type f \( -name '*.png' -o -name '*.jpg' \) 2>/dev/null | head -n1)"
+fi
+[ -n "$WALL" ] && [ -f "$WALL" ] || exit 0
+if command -v xfconf-query >/dev/null 2>&1; then
+    for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true); do
+        xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" || true
+    done
+fi
+command -v feh >/dev/null 2>&1 && feh --bg-fill "$WALL" || true
+exit 0
+EOF
+
+          echo "--- sanity check: shebangs must be at byte 0 ---"
+          head -n1 root/defaults/startwm.sh | cat -A | head -n1
 
       - name: Build image
         shell: bash
@@ -151,11 +189,7 @@ jobs:
             --shm-size=2gb \
             --security-opt seccomp=unconfined \
             -p 127.0.0.1:3000:3000 \
-            -e PUID=1000 \
-            -e PGID=1000 \
-            -e TZ=Asia/Tehran \
-            -e LC_ALL=en_US.UTF-8 \
-            -e PIXELFLUX_WAYLAND=false \
+            -e PUID=1000 -e PGID=1000 -e TZ=Asia/Tehran \
             -e CUSTOM_USER="${DESKTOP_USER}" \
             -e PASSWORD="${DESKTOP_PASSWORD}" \
             -e TITLE="Kali Web Desktop" \
@@ -173,34 +207,36 @@ jobs:
             -e SELKIES_IS_MANUAL_RESOLUTION_MODE="true|locked" \
             -e SELKIES_MANUAL_WIDTH="1280" \
             -e SELKIES_MANUAL_HEIGHT="720" \
-            -e MAX_RES="1920x1080" \
             -e SELKIES_AUDIO_ENABLED="true|locked" \
             -e SELKIES_AUDIO_BITRATE="192000" \
             -e SELKIES_MICROPHONE_ENABLED="false|locked" \
-            -e SELKIES_UI_SIDEBAR_SHOW_AUDIO_SETTINGS="true" \
             -e SELKIES_UI_SIDEBAR_SHOW_SOFT_BUTTONS="true" \
-            -e SELKIES_UI_SIDEBAR_SHOW_KEYBOARD_BUTTON="true" \
             -v selkies-config:/config \
             kali-selkies:local
 
-      - name: Wait for Selkies
+      - name: Wait for Selkies and verify the desktop really started
         shell: bash
         run: |
           set -euo pipefail
           for i in $(seq 1 120); do
-            if curl -fsS --user "${DESKTOP_USER}:${DESKTOP_PASSWORD}" \
-                 --max-time 10 http://127.0.0.1:3000/ -o /tmp/selkies.html; then
-              echo "Selkies is up."
+            curl -fsS --user "${DESKTOP_USER}:${DESKTOP_PASSWORD}" --max-time 10 \
+              http://127.0.0.1:3000/ -o /tmp/selkies.html && break
+            docker ps --format '{{.Names}}' | grep -qx selkies-desktop || {
+              echo "::error::Container died."; docker logs --tail 200 selkies-desktop; exit 1; }
+            sleep 2
+          done
+
+          echo "--- waiting for xfce4-session ---"
+          for i in $(seq 1 60); do
+            if docker exec selkies-desktop pgrep -f xfce4-session >/dev/null 2>&1; then
+              echo "XFCE session is running."
+              docker exec selkies-desktop bash -c 'DISPLAY=:1 xdotool search --name "" >/dev/null 2>&1; echo x11-ok'
               exit 0
-            fi
-            if ! docker ps --format '{{.Names}}' | grep -qx 'selkies-desktop'; then
-              echo "::error::Container stopped unexpectedly."
-              docker logs --tail 200 selkies-desktop || true
-              exit 1
             fi
             sleep 2
           done
-          echo "::error::Selkies never responded."
+          echo "::error::XFCE never started - here is startwm.log:"
+          docker exec selkies-desktop cat /config/startwm.log || true
           docker logs --tail 200 selkies-desktop || true
           exit 1
 
@@ -220,7 +256,6 @@ jobs:
           nohup cloudflared tunnel --url http://127.0.0.1:3000 \
             --protocol http2 --no-autoupdate --loglevel info \
             --logfile /tmp/cloudflared.log >/tmp/cloudflared.stdout 2>&1 &
-
           PUBLIC_URL=""
           for i in $(seq 1 90); do
             PUBLIC_URL="$(grep -hEo 'https://[-a-z0-9]+\.trycloudflare\.com' \
@@ -228,27 +263,8 @@ jobs:
             [ -n "${PUBLIC_URL}" ] && break
             sleep 2
           done
-          if [ -z "${PUBLIC_URL}" ]; then
-            echo "::error::No public URL from Cloudflare."
-            cat /tmp/cloudflared.log /tmp/cloudflared.stdout || true
-            exit 1
-          fi
+          [ -n "${PUBLIC_URL}" ] || { echo "::error::No tunnel URL."; cat /tmp/cloudflared.log; exit 1; }
           echo "PUBLIC_URL=${PUBLIC_URL}" >> "${GITHUB_ENV}"
-
-      - name: Public tunnel test
-        shell: bash
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if curl -fsSL --user "${DESKTOP_USER}:${DESKTOP_PASSWORD}" \
-                 --max-time 20 "${PUBLIC_URL}" -o /tmp/public.html; then
-              echo "Public tunnel OK."
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::Public URL never responded."
-          exit 1
 
       - name: Publish desktop link
         shell: bash
@@ -257,14 +273,11 @@ jobs:
           {
             echo "## Kali Web Desktop is ready"
             echo
-            echo "- Desktop URL: ${PUBLIC_URL}"
+            echo "- URL: ${PUBLIC_URL}"
             echo "- Username: ${DESKTOP_USER}"
-            echo "- Password: value of the SELKIES_PASSWORD Actions secret"
-            echo "- Resolution: 1280x720 @ 60fps (CPU / x264, CRF 18)"
-            echo "- Audio: enabled (192kbps), microphone disabled"
+            echo "- Password: the SELKIES_PASSWORD secret"
+            echo "- Installed: XFCE, Chromium, Claude Desktop, Thunar, Mousepad"
             echo "- Keyboard stuck? press Ctrl+Alt+K inside the desktop"
-            echo
-            echo "The link only works while this job keeps running."
           } >> "${GITHUB_STEP_SUMMARY}"
           echo "Desktop URL: ${PUBLIC_URL}"
 
@@ -273,8 +286,9 @@ jobs:
         run: |
           set -euo pipefail
           while true; do
-            if ! docker ps --format '{{.Names}}' | grep -qx 'selkies-desktop'; then
+            if ! docker ps --format '{{.Names}}' | grep -qx selkies-desktop; then
               echo "::error::Container stopped."
+              docker exec selkies-desktop cat /config/startwm.log 2>/dev/null || true
               docker logs --tail 200 selkies-desktop || true
               exit 1
             fi
