@@ -112,7 +112,7 @@ jobs:
             -e TITLE="GitHub Selkies Desktop" \
             -e SELKIES_USE_CPU="true|locked" \
             -e SELKIES_ENCODER="x264enc,jpeg" \
-            -e SELKIES_FRAMERATE="30" \
+            -e SELKIES_FRAMERATE="60" \
             -e SELKIES_MANUAL_WIDTH="1280" \
             -e SELKIES_MANUAL_HEIGHT="720" \
             -e SELKIES_AUDIO_ENABLED="true" \
