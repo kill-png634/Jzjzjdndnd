@@ -25,91 +25,79 @@ jobs:
             exit 1
           fi
 
-        - name: Create Kali customization files
-    shell: bash
-    run: |
-      set -euo pipefail
+      - name: Create Kali customization files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      mkdir -p root/defaults/.config/autostart root/usr/local/bin
+          mkdir -p root/defaults/.config/autostart root/usr/local/bin
 
-      # ---------- Dockerfile: Kali + browser + fonts ----------
-      cat > Dockerfile <<'EOF'
-      FROM lscr.io/linuxserver/kali-linux:latest
+          # ---------- Dockerfile: Kali + browser + fonts + wallpapers ----------
+          cat > Dockerfile <<'EOF'
+          FROM lscr.io/linuxserver/kali-linux:latest
 
-      USER root
+          USER root
 
-      RUN apt-get update && \
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            firefox-esr \
-            fonts-noto \
-            fonts-noto-color-emoji \
-            feh && \
-          apt-get clean && \
-          rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+          RUN apt-get update && \
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                firefox-esr \
+                fonts-noto \
+                fonts-noto-color-emoji \
+                kali-wallpapers && \
+              apt-get clean && \
+              rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-      COPY root/ /
+          # Fail the build early if no wallpaper landed on disk
+          RUN test -n "$(find /usr/share/backgrounds -type f \( -name '*.jpg' -o -name '*.png' \) | head -n1)"
 
-      RUN chmod +x /usr/local/bin/set-wallpaper
-      EOF
+          COPY root/ /
+          EOF
 
+          # ---------- Autostart: set a nice wallpaper (KDE + XFCE compatible) ----------
+          cat > root/defaults/.config/autostart/wallpaper.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Set Wallpaper
+          Exec=/usr/local/bin/set-wallpaper
+          X-GNOME-Autostart-enabled=true
+          EOF
 
-      # ---------- Autostart wallpaper ----------
-      cat > root/defaults/.config/autostart/wallpaper.desktop <<'EOF'
-      [Desktop Entry]
-      Type=Application
-      Name=Set Wallpaper
-      Exec=/usr/local/bin/set-wallpaper
-      X-GNOME-Autostart-enabled=true
-      EOF
-
-
-      cat > root/usr/local/bin/set-wallpaper <<'EOF'
-      #!/bin/bash
-
-      sleep 5
-
-      WALL=""
-
-      for candidate in \
-        /usr/share/backgrounds/**/*.jpg \
-        /usr/share/backgrounds/**/*.png \
-        /usr/share/backgrounds/*.jpg \
-        /usr/share/backgrounds/*.png
-      do
-          if [ -f "$candidate" ]; then
-              WALL="$candidate"
-              break
-          fi
-      done
-
-      [ -z "$WALL" ] && exit 0
-
-
-      # XFCE
-      if command -v xfconf-query >/dev/null 2>&1; then
-          for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true)
-          do
-              xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" || true
+          cat > root/usr/local/bin/set-wallpaper <<'EOF'
+          #!/bin/bash
+          # Pick the nicest available Kali wallpaper
+          WALL=""
+          for candidate in \
+            /usr/share/backgrounds/kali/kali-*.jpg \
+            /usr/share/backgrounds/kali/*.jpg \
+            /usr/share/backgrounds/*.jpg \
+            /usr/share/backgrounds/*.png ; do
+            if [ -f "$candidate" ]; then WALL="$candidate"; break; fi
           done
-      fi
+          [ -z "$WALL" ] && exit 0
 
+          # Give the session a moment to come up
+          sleep 6
 
-      # KDE
-      if command -v plasma-apply-wallpaperimage >/dev/null 2>&1; then
-          plasma-apply-wallpaperimage "$WALL" || true
-      fi
+          # KDE Plasma Wayland/X11
+          if command -v plasma-apply-wallpaperimage >/dev/null 2>&1; then
+            plasma-apply-wallpaperimage "$WALL" >/dev/null 2>&1 || true
+          fi
 
+          # XFCE
+          if command -v xfconf-query >/dev/null 2>&1; then
+            for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep -E 'last-image$'); do
+              xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" 2>/dev/null || true
+            done
+          fi
 
-      # fallback
-      if command -v feh >/dev/null 2>&1; then
-          feh --bg-fill "$WALL" || true
-      fi
+          # Generic fallback
+          if command -v feh >/dev/null 2>&1; then
+            feh --bg-fill "$WALL" >/dev/null 2>&1 || true
+          fi
+          EOF
 
-      exit 0
-      EOF
+          chmod +x root/usr/local/bin/set-wallpaper
 
-
-      chmod +x root/usr/local/bin/set-wallpaper
       - name: Build Kali Selkies image
         shell: bash
         run: |
@@ -132,7 +120,7 @@ jobs:
             `# ---- Video: smooth CPU streaming ----` \
             -e SELKIES_USE_CPU="true|locked" \
             -e SELKIES_ENCODER="x264enc,jpeg" \
-            -e SELKIES_FRAMERATE="30" \
+            -e SELKIES_FRAMERATE="60" \
             -e SELKIES_H264_CRF="18" \
             -e SELKIES_JPEG_QUALITY="85" \
             -e SELKIES_USE_PAINT_OVER_QUALITY="true" \
