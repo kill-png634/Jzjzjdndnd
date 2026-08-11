@@ -31,148 +31,150 @@ jobs:
           set -euo pipefail
           mkdir -p root/defaults root/usr/local/bin root/etc/chromium.d
 
-cat > Dockerfile <<'DOCKERFILE'
-FROM ghcr.io/linuxserver/baseimage-selkies:kali
+          cat > Dockerfile <<'DOCKERFILE'
+          FROM ghcr.io/linuxserver/baseimage-selkies:kali
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TITLE="Kali Web Desktop"
+          ENV DEBIAN_FRONTEND=noninteractive
+          ENV TITLE="Kali Web Desktop"
 
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg wget locales procps \
-      xfce4 xfce4-terminal xfce4-panel xfce4-settings \
-      thunar mousepad dbus-x11 xdg-utils feh \
-      x11-xkb-utils xkb-data x11-xserver-utils xdotool xclip \
-      chromium \
-      fonts-noto fonts-noto-color-emoji \
-      libnss3 libxss1 libxtst6 libgtk-3-0 libgbm1 libsecret-1-0 \
-      libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libcups2; \
-    ( apt-get install -y --no-install-recommends libasound2t64 \
-      || apt-get install -y --no-install-recommends libasound2 ); \
-    sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; \
-    apt-get clean; rm -rf /var/lib/apt/lists/*
+          RUN set -eux; \
+              apt-get update; \
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl gnupg wget locales procps \
+                xfce4 xfce4-terminal xfce4-panel xfce4-settings \
+                thunar mousepad dbus-x11 xdg-utils feh \
+                x11-xkb-utils xkb-data x11-xserver-utils xdotool xclip \
+                chromium fonts-noto fonts-noto-color-emoji \
+                libnss3 libxss1 libxtst6 libgtk-3-0 libgbm1 libsecret-1-0 \
+                libatk-bridge2.0-0 libatspi2.0-0 libdrm2 libcups2; \
+              ( apt-get install -y --no-install-recommends libasound2t64 \
+                || apt-get install -y --no-install-recommends libasound2 ); \
+              sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; \
+              apt-get clean; rm -rf /var/lib/apt/lists/*
 
-# Official Claude Desktop for Linux (Anthropic apt repo)
-RUN set -eux; \
-    curl -fsSLo /usr/share/keyrings/claude-desktop-archive-keyring.asc \
-      https://downloads.claude.ai/claude-desktop/key.asc; \
-    echo 'CLAUDE_DESKTOP_ADD_REPO="false"' > /etc/default/claude-desktop; \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
-      > /etc/apt/sources.list.d/claude-desktop.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends claude-desktop; \
-    apt-get clean; rm -rf /var/lib/apt/lists/*
+          RUN set -eux; \
+              curl -fsSLo /usr/share/keyrings/claude-desktop-archive-keyring.asc \
+                https://downloads.claude.ai/claude-desktop/key.asc; \
+              echo 'CLAUDE_DESKTOP_ADD_REPO="false"' > /etc/default/claude-desktop; \
+              echo "deb [arch=amd64 signed-by=/usr/share/keyrings/claude-desktop-archive-keyring.asc] https://downloads.claude.ai/claude-desktop/apt/stable stable main" \
+                > /etc/apt/sources.list.d/claude-desktop.list; \
+              apt-get update; \
+              apt-get install -y --no-install-recommends claude-desktop; \
+              apt-get clean; rm -rf /var/lib/apt/lists/*
 
-# Kill screen blanking / power management (this is what turns the screen black)
-RUN set -eux; \
-    rm -f /etc/xdg/autostart/xfce4-power-manager.desktop \
-          /etc/xdg/autostart/xscreensaver.desktop \
-          /etc/xdg/autostart/xfce4-screensaver.desktop \
-          /etc/xdg/autostart/light-locker.desktop \
-          /usr/share/xfce4/panel/plugins/power-manager-plugin.desktop || true
+          RUN set -eux; \
+              rm -f /etc/xdg/autostart/xfce4-power-manager.desktop \
+                    /etc/xdg/autostart/xscreensaver.desktop \
+                    /etc/xdg/autostart/xfce4-screensaver.desktop \
+                    /etc/xdg/autostart/light-locker.desktop \
+                    /usr/share/xfce4/panel/plugins/power-manager-plugin.desktop || true
 
-COPY root/ /
+          COPY root/ /
 
-RUN set -eux; \
-    chmod +x /defaults/startwm.sh \
-             /usr/local/bin/claude-desktop-web \
-             /usr/local/bin/fix-keyboard \
-             /usr/local/bin/set-wallpaper; \
-    head -c 2 /defaults/startwm.sh | grep -q '#!'; \
-    for f in /usr/share/applications/*laude*.desktop; do \
-      [ -e "$f" ] || continue; \
-      sed -i -E 's|^Exec=.*|Exec=/usr/local/bin/claude-desktop-web %U|' "$f"; \
-    done; \
-    for f in /usr/share/applications/chromium*.desktop; do \
-      [ -e "$f" ] || continue; \
-      sed -i -E 's|^(Exec=[^ ]+)|\1 --no-sandbox --disable-gpu --test-type|' "$f"; \
-    done
-DOCKERFILE
+          RUN set -eux; \
+              chmod +x /defaults/startwm.sh /defaults/startwm_wayland.sh \
+                       /usr/local/bin/claude-desktop-web \
+                       /usr/local/bin/fix-keyboard \
+                       /usr/local/bin/set-wallpaper; \
+              head -c 2 /defaults/startwm.sh | grep -q '#!'; \
+              command -v xfce4-session; \
+              for f in /usr/share/applications/*laude*.desktop; do \
+                [ -e "$f" ] || continue; \
+                sed -i -E 's|^Exec=.*|Exec=/usr/local/bin/claude-desktop-web %U|' "$f"; \
+              done; \
+              for f in /usr/share/applications/chromium*.desktop; do \
+                [ -e "$f" ] || continue; \
+                sed -i -E 's|^(Exec=[^ ]+)|\1 --no-sandbox --disable-gpu --test-type|' "$f"; \
+              done
+          DOCKERFILE
 
-cat > root/etc/chromium.d/lsio-flags <<'EOF'
-export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-gpu --disable-dev-shm-usage --test-type"
-EOF
+          cat > root/etc/chromium.d/lsio-flags <<'EOF'
+          export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-gpu --disable-dev-shm-usage --test-type"
+          EOF
 
-cat > root/defaults/startwm.sh <<'EOF'
-#!/bin/bash
-exec >> /config/startwm.log 2>&1
-echo "=== startwm.sh $(date) DISPLAY=${DISPLAY:-unset} ==="
+          cat > root/defaults/startwm.sh <<'EOF'
+          #!/bin/bash
+          exec >> /config/startwm.log 2>&1
+          echo "=== startwm.sh $(date) DISPLAY=${DISPLAY:-unset} ==="
 
-export DISPLAY="${DISPLAY:-:1}"
-export XDG_CURRENT_DESKTOP=XFCE
-export XDG_SESSION_TYPE=x11
+          export DISPLAY="${DISPLAY:-:1}"
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_TYPE=x11
 
-# never blank the screen
-xset s off      || true
-xset s noblank  || true
-xset -dpms      || true
+          xset s off     || true
+          xset s noblank || true
+          xset -dpms     || true
 
-/usr/local/bin/fix-keyboard || true
-( sleep 10; /usr/local/bin/set-wallpaper ) &
+          /usr/local/bin/fix-keyboard || true
+          ( sleep 10; /usr/local/bin/set-wallpaper ) &
 
-xfconf-query -c xfce4-keyboard-shortcuts \
-  -p "/commands/custom/<Primary><Alt>k" -n -t string \
-  -s "/usr/local/bin/fix-keyboard" 2>/dev/null || true
+          xfconf-query -c xfce4-keyboard-shortcuts \
+            -p "/commands/custom/<Primary><Alt>k" -n -t string \
+            -s "/usr/local/bin/fix-keyboard" 2>/dev/null || true
 
-if command -v xfce4-session >/dev/null 2>&1; then
-    exec dbus-launch --exit-with-session /usr/bin/xfce4-session
-fi
+          if command -v xfce4-session >/dev/null 2>&1; then
+              exec dbus-launch --exit-with-session /usr/bin/xfce4-session
+          fi
 
-echo "!!! xfce4-session missing, falling back to openbox"
-exec dbus-launch --exit-with-session /usr/bin/openbox-session
-EOF
+          echo "!!! xfce4-session missing, falling back to openbox"
+          exec dbus-launch --exit-with-session /usr/bin/openbox-session
+          EOF
 
-cat > root/usr/local/bin/claude-desktop-web <<'EOF'
-#!/bin/bash
-export GDK_BACKEND=x11
-export ELECTRON_OZONE_PLATFORM_HINT=x11
-mkdir -p "$HOME/.config/Claude"
-rm -f "$HOME/.config/Claude/SingletonLock" 2>/dev/null || true
-exec /usr/bin/claude-desktop \
-  --no-sandbox \
-  --disable-gpu \
-  --disable-software-rasterizer \
-  --disable-dev-shm-usage \
-  --password-store=basic \
-  "$@"
-EOF
+          cp root/defaults/startwm.sh root/defaults/startwm_wayland.sh
 
-cat > root/usr/local/bin/fix-keyboard <<'EOF'
-#!/bin/bash
-export DISPLAY="${DISPLAY:-:1}"
-setxkbmap -model pc105 -layout us -option "" 2>/dev/null || true
-for k in Shift_L Shift_R Control_L Control_R Alt_L Alt_R \
-         Super_L Super_R ISO_Level3_Shift Meta_L; do
-    xdotool keyup "$k" 2>/dev/null || true
-done
-if [ "$(xset -q 2>/dev/null | awk '/Caps Lock:/ {print $4}')" = "on" ]; then
-    xdotool key --clearmodifiers Caps_Lock 2>/dev/null || true
-fi
-xset r rate 400 30 2>/dev/null || true
-exit 0
-EOF
+          cat > root/usr/local/bin/claude-desktop-web <<'EOF'
+          #!/bin/bash
+          export GDK_BACKEND=x11
+          export ELECTRON_OZONE_PLATFORM_HINT=x11
+          mkdir -p "$HOME/.config/Claude"
+          rm -f "$HOME/.config/Claude/SingletonLock" 2>/dev/null || true
+          exec /usr/bin/claude-desktop \
+            --no-sandbox \
+            --disable-gpu \
+            --disable-software-rasterizer \
+            --disable-dev-shm-usage \
+            --password-store=basic \
+            "$@"
+          EOF
 
-cat > root/usr/local/bin/set-wallpaper <<'EOF'
-#!/bin/bash
-export DISPLAY="${DISPLAY:-:1}"
-WALL="${1:-}"
-if [ -z "$WALL" ]; then
-    WALL="$(find /usr/share/backgrounds /usr/share/wallpapers \
-            -maxdepth 3 -type f \( -name '*.png' -o -name '*.jpg' \) 2>/dev/null | head -n1)"
-fi
-[ -n "$WALL" ] && [ -f "$WALL" ] || exit 0
-if command -v xfconf-query >/dev/null 2>&1; then
-    for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true); do
-        xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" || true
-    done
-fi
-command -v feh >/dev/null 2>&1 && feh --bg-fill "$WALL" || true
-exit 0
-EOF
+          cat > root/usr/local/bin/fix-keyboard <<'EOF'
+          #!/bin/bash
+          export DISPLAY="${DISPLAY:-:1}"
+          setxkbmap -model pc105 -layout us -option "" 2>/dev/null || true
+          for k in Shift_L Shift_R Control_L Control_R Alt_L Alt_R \
+                   Super_L Super_R ISO_Level3_Shift Meta_L; do
+              xdotool keyup "$k" 2>/dev/null || true
+          done
+          if [ "$(xset -q 2>/dev/null | awk '/Caps Lock:/ {print $4}')" = "on" ]; then
+              xdotool key --clearmodifiers Caps_Lock 2>/dev/null || true
+          fi
+          xset r rate 400 30 2>/dev/null || true
+          exit 0
+          EOF
 
-          echo "--- sanity check: shebangs must be at byte 0 ---"
-          head -n1 root/defaults/startwm.sh | cat -A | head -n1
+          cat > root/usr/local/bin/set-wallpaper <<'EOF'
+          #!/bin/bash
+          export DISPLAY="${DISPLAY:-:1}"
+          WALL="${1:-}"
+          if [ -z "$WALL" ]; then
+              WALL="$(find /usr/share/backgrounds /usr/share/wallpapers \
+                      -maxdepth 3 -type f \( -name '*.png' -o -name '*.jpg' \) \
+                      2>/dev/null | head -n1)"
+          fi
+          [ -n "$WALL" ] && [ -f "$WALL" ] || exit 0
+          if command -v xfconf-query >/dev/null 2>&1; then
+              for prop in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true); do
+                  xfconf-query -c xfce4-desktop -p "$prop" -s "$WALL" || true
+              done
+          fi
+          command -v feh >/dev/null 2>&1 && feh --bg-fill "$WALL" || true
+          exit 0
+          EOF
+
+          echo "--- generated files ---"
+          ls -l root/defaults root/usr/local/bin
+          echo "--- first line of startwm.sh (must start with #!) ---"
+          head -n1 root/defaults/startwm.sh | cat -A
 
       - name: Build image
         shell: bash
@@ -190,6 +192,7 @@ EOF
             --security-opt seccomp=unconfined \
             -p 127.0.0.1:3000:3000 \
             -e PUID=1000 -e PGID=1000 -e TZ=Asia/Tehran \
+            -e PIXELFLUX_WAYLAND=false \
             -e CUSTOM_USER="${DESKTOP_USER}" \
             -e PASSWORD="${DESKTOP_PASSWORD}" \
             -e TITLE="Kali Web Desktop" \
@@ -214,7 +217,7 @@ EOF
             -v selkies-config:/config \
             kali-selkies:local
 
-      - name: Wait for Selkies and verify the desktop really started
+      - name: Wait for Selkies and verify XFCE really started
         shell: bash
         run: |
           set -euo pipefail
@@ -226,17 +229,20 @@ EOF
             sleep 2
           done
 
-          echo "--- waiting for xfce4-session ---"
           for i in $(seq 1 60); do
             if docker exec selkies-desktop pgrep -f xfce4-session >/dev/null 2>&1; then
               echo "XFCE session is running."
-              docker exec selkies-desktop bash -c 'DISPLAY=:1 xdotool search --name "" >/dev/null 2>&1; echo x11-ok'
+              docker exec selkies-desktop bash -lc 'DISPLAY=:1 xdotool search --onlyvisible --name "." | head' || true
               exit 0
             fi
             sleep 2
           done
-          echo "::error::XFCE never started - here is startwm.log:"
+
+          echo "::error::XFCE never started."
+          echo "--- /config/startwm.log ---"
           docker exec selkies-desktop cat /config/startwm.log || true
+          echo "--- processes ---"
+          docker exec selkies-desktop ps aux || true
           docker logs --tail 200 selkies-desktop || true
           exit 1
 
